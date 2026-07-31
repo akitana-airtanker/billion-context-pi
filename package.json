@@ -1,0 +1,60 @@
+{
+  "name": "pai-acp",
+  "version": "0.0.2",
+  "description": "Active Context Pruning (ACP) extension for Pi — model-driven context compression that keeps conversations flowing.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
+  "homepage": "https://github.com/ranxianglei/pai-acp#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ranxianglei/pai-acp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ranxianglei/pai-acp/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsup && tsc --emitDeclarationOnly"
+  },
+  "keywords": [
+    "pi",
+    "acp",
+    "context",
+    "compression",
+    "context-management",
+    "llm"
+  ],
+  "author": "ranxianglei",
+  "license": "MIT",
+  "type": "module",
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "acp-kernel": "file:../acp-kernel",
+    "tsup": "^8.5.1",
+    "tsx": "^4.23.1",
+    "typescript": "^7.0.2"
+  }
+}
