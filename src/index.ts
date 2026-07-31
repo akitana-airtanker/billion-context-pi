@@ -4,7 +4,7 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage, NudgeDecision } from "acp-kernel";
+import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
 import { renderNudgeText } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
@@ -99,7 +99,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    const out = turn.nudge?.shouldInject ? [...rebuilt, nudgeMessage(turn.nudge)] : rebuilt;
+    const out = turn.nudge?.shouldInject ? [...rebuilt, nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active))] : rebuilt;
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
@@ -134,14 +134,24 @@ function collectOriginals(entries: ReturnType<ExtensionContext["sessionManager"]
   return map;
 }
 
-function nudgeMessage(nudge: NudgeDecision): AgentMessage {
+function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMessage {
   const rendered = renderNudgeText(nudge);
   const lines = [rendered.text];
 
-  const top = [...nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-  if (top) {
+  if (blocks.length > 0) {
+    const totalSummary = blocks.reduce((s, b) => s + Math.ceil((b.summary || "").length / 4), 0);
+    const totalCompressed = blocks.reduce((s, b) => s + (b.compressedTokens || 0), 0);
+    const fmt = (n: number) => (n >= 1000 ? `${(n / 1000).toFixed(1)}K` : `${n}`);
+    const tierCounts: Record<number, number> = {};
+    for (const b of blocks) {
+      const t = b.tier ?? 1;
+      tierCounts[t] = (tierCounts[t] || 0) + 1;
+    }
+    const tierStr = Object.keys(tierCounts).map(Number).sort().map((t) => `T${t}:${tierCounts[t]}`).join(" ");
+    const ids = blocks.slice(0, 10).map((b) => `b${b.blockId}`).join(", ");
+    const extra = blocks.length > 10 ? ` (+${blocks.length - 10} more)` : "";
     lines.push("");
-    lines.push(`Example: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })`);
+    lines.push(`Compressed blocks: ${blocks.length} active (${tierStr}) — ${fmt(totalSummary)} summary, ${fmt(totalCompressed)} original compressed. Blocks: ${ids}${extra}.`);
   }
 
   return {
