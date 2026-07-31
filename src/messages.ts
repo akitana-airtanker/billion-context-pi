@@ -174,6 +174,10 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
   const tag = match ? match[0] : null;
   if (!tag) return original;
   const base = original as AnyMessage;
+  // Skip tag injection for assistant messages — the model sees tags on its own
+  // previous responses and echoes them, causing visible tag fragments in the terminal.
+  // The model can still reference assistant messages by inferring refs from context.
+  if (base.role === "assistant") return original;
   const rawBlocks = Array.isArray(base.content)
     ? base.content
     : typeof base.content === "string"
