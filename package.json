@@ -1,6 +1,6 @@
 {
   "name": "pai-acp",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Active Context Pruning (ACP) extension for Pi — model-driven context compression that keeps conversations flowing.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -11,7 +11,9 @@
     }
   },
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "files": [
     "dist",
