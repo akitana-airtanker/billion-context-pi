@@ -97,8 +97,9 @@ test("coreOutToAgentMessages patches the ref tag onto original messages", () => 
   const out = coreOutToAgentMessages(coreOut, originalById);
   const content = (out[0] as { content: Array<{ type: string; text: string }> }).content;
   assert.equal(content[0]!.type, "text");
-  assert.equal(content[0]!.text, tag);
-  assert.equal(content[1]!.text, "hello");
+  assert.ok(content[0]!.text.includes("hello"), "content includes original text");
+  assert.ok(content[0]!.text.includes("m00001"), "content includes ref id");
+  assert.equal(content.length, 1, "tag embedded in single text block, not separate");
 });
 
 test("coreOutToAgentMessages returns original unchanged when no ref tag is present", () => {

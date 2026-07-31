@@ -180,9 +180,25 @@ function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
       ? [{ type: "text" as const, text: base.content }]
       : [];
   const peeled = peelRefTagBlocks(rawBlocks);
+
+  const newBlocks = [...peeled];
+  let injected = false;
+  for (let i = newBlocks.length - 1; i >= 0; i--) {
+    const b = newBlocks[i] as { type?: string; text?: string };
+    if (b?.type === "text" && typeof b.text === "string") {
+      const baseText = b.text.replace(/\n*$/, "");
+      newBlocks[i] = { ...b, text: baseText.length > 0 ? `${baseText}\n\n${tag}` : tag };
+      injected = true;
+      break;
+    }
+  }
+  if (injected) {
+    return { ...(original as object), content: newBlocks } as AgentMessage;
+  }
+
   return {
     ...(original as object),
-    content: [{ type: "text", text: tag }, ...peeled],
+    content: [...peeled, { type: "text" as const, text: tag }],
   } as AgentMessage;
 }
 

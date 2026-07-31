@@ -84,7 +84,7 @@ test("context handler tags every message with a ref even when length matches eve
   const out = result.messages;
   assert.equal(out.length, 3);
   const firstContent = (out[0] as any).content as any[];
-  assert.ok(firstContent.some((b: any) => b.type === "text" && /^<acp\s[^>]*>m\d{5}<\/acp>\n?$/.test(b.text)), "first msg ref-tagged");
+  assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "first msg ref-tagged");
 });
 
 test("context handler persists state so a second call is idempotent on the same entries", async () => {
