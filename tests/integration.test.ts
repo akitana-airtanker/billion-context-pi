@@ -66,7 +66,7 @@ test("before_agent_start appends the ACP system prompt", () => {
   const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "BASE" }, {});
   assert.ok(result.systemPrompt.startsWith("BASE"));
   assert.ok(result.systemPrompt.includes("compress"));
-  assert.ok(result.systemPrompt.includes("[mNNNNN]"));
+  assert.ok(result.systemPrompt.includes("acp"));
 });
 
 test("context handler tags every message with a ref even when length matches event.messages", async () => {
@@ -84,7 +84,7 @@ test("context handler tags every message with a ref even when length matches eve
   const out = result.messages;
   assert.equal(out.length, 3);
   const firstContent = (out[0] as any).content as any[];
-  assert.ok(firstContent.some((b: any) => b.type === "text" && /^\[m\d{5}\] $/.test(b.text)), "first msg ref-tagged");
+  assert.ok(firstContent.some((b: any) => b.type === "text" && /^<acp\s[^>]*>m\d{5}<\/acp>\n?$/.test(b.text)), "first msg ref-tagged");
 });
 
 test("context handler persists state so a second call is idempotent on the same entries", async () => {

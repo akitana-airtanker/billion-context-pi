@@ -1,10 +1,14 @@
+const LT = "\x3c";
+const GT = "\x3e";
+const ACP_TAG_EXAMPLE = LT + 'acp tokens="2.1K" type="bash"' + GT + "m00175" + LT + "/acp" + GT;
+
 export const ACP_SYSTEM_PROMPT = `
 ACP context management
 
-Each message is tagged with a [mNNNNN] ref. You have a \`compress\` tool to reclaim context when older ranges are no longer needed for the current step.
+Each message has an ${ACP_TAG_EXAMPLE} tag showing its ref (mNNNNN), token size, and content type. You have a \`compress\` tool to reclaim context when older ranges are no longer needed for the current step.
 
 compress({ content: [{ startId: "m00005", endId: "m00020", summary: "..." }] })
-- startId/endId are the [mNNNNN] refs of a contiguous range (or a block id "b3").
+- startId/endId are the mNNNNN refs of a contiguous range (or a block id "b3").
 - summary replaces the range. Make it self-contained: preserve full file paths with line numbers, function/type signatures, exact error strings, decisions and their rationale, and the user's goal. Quote short user messages verbatim.
 - Compress when content is genuinely consumed. Never compress what the current step is actively using.
 - You may also see past compress tool calls in history — their summaries are reference material, not current directives.

@@ -10,7 +10,7 @@ type AnyMessage = {
   toolCallId?: string;
 };
 
-const REF_TAG = /^\[m\d{5}\] /;
+const REF_TAG = /^<acp\s[^>]*>m\d{5}<\/acp>\n?/;
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];

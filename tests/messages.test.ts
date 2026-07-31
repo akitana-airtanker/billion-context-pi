@@ -4,6 +4,12 @@ import { entriesToCoreMessages, coreOutToAgentMessages } from "../src/messages.j
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 
+const LT = "\x3c";
+const GT = "\x3e";
+function acpRef(ref: string, tokens = "2", type = "text"): string {
+  return LT + 'acp tokens="' + tokens + '" type="' + type + '"' + GT + ref + LT + "/acp" + GT;
+}
+
 function msgEntry(id: string, message: object): SessionMessageEntry {
   return {
     type: "message",
@@ -83,14 +89,15 @@ test("entriesToCoreMessages skips non-message entries (compaction, model_change)
 });
 
 test("coreOutToAgentMessages patches the ref tag onto original messages", () => {
+  const tag = acpRef("m00001") + "\n";
   const original = msgEntry("a", user("hello")).message;
   const originalById = new Map([["a", original]]);
-  const coreOut: CoreMessage[] = [{ id: "a", role: "user", contentType: "text", text: "[m00001] hello" }];
+  const coreOut: CoreMessage[] = [{ id: "a", role: "user", contentType: "text", text: tag + "hello" }];
 
   const out = coreOutToAgentMessages(coreOut, originalById);
   const content = (out[0] as { content: Array<{ type: string; text: string }> }).content;
   assert.equal(content[0]!.type, "text");
-  assert.equal(content[0]!.text, "[m00001] ");
+  assert.equal(content[0]!.text, tag);
   assert.equal(content[1]!.text, "hello");
 });
 
@@ -121,10 +128,11 @@ test("coreOutToAgentMessages reconstructs parallel tool-call assistant message f
   ]);
   const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
 
+  const tag = acpRef("m00003");
   const coreOut: CoreMessage[] = [
-    { id: "entry1#call_a", role: "assistant", contentType: "tool-call", toolName: "read", toolCallId: "call_a", text: "[m00003] Running multiple tools\n{}" },
-    { id: "entry1#call_b", role: "assistant", contentType: "tool-call", toolName: "write", toolCallId: "call_b", text: "[m00003] {}" },
-    { id: "entry1#call_c", role: "assistant", contentType: "tool-call", toolName: "list", toolCallId: "call_c", text: "[m00003] {}" },
+    { id: "entry1#call_a", role: "assistant", contentType: "tool-call", toolName: "read", toolCallId: "call_a", text: tag + "\nRunning multiple tools\n{}" },
+    { id: "entry1#call_b", role: "assistant", contentType: "tool-call", toolName: "write", toolCallId: "call_b", text: tag + "\n{}" },
+    { id: "entry1#call_c", role: "assistant", contentType: "tool-call", toolName: "list", toolCallId: "call_c", text: tag + "\n{}" },
   ];
 
   const out = coreOutToAgentMessages(coreOut, originalById);
@@ -137,7 +145,7 @@ test("coreOutToAgentMessages reconstructs parallel tool-call assistant message f
 
   const textBlocks = content.filter((b) => b.type === "text");
   assert.ok(textBlocks.length >= 1, "text block preserved");
-  assert.ok(textBlocks[0]!.text!.startsWith("[m00003]"), "ref tag prepended");
+  assert.ok(textBlocks[0]!.text!.startsWith(acpRef("m00003").substring(0, 4)), "ref tag prepended");
 });
 
 test("coreOutToAgentMessages drops pruned tool-call blocks when only some survive", () => {

@@ -13,7 +13,7 @@ function formatK(n: number): string {
 }
 
 const RangeSpec = Type.Object({
-  startId: Type.String({ description: 'Message ref, e.g. "m00005" (from the [mNNNNN] tag), or a block id "b3".' }),
+  startId: Type.String({ description: 'Message ref, e.g. "m00005" (from the acp tag), or a block id "b3".' }),
   endId: Type.String({ description: 'Inclusive end ref. Must be at or after startId.' }),
   summary: Type.String({ description: "Complete technical summary replacing all content in range. Keep only essential details (conclusions, file paths, decisions, exact values, etc.)." }),
   topic: Type.Optional(Type.String({ description: "Short label (3-5 words) for THIS range, e.g. 'Auth System Exploration'. Omit to use top-level topic. When compressing multiple unrelated ranges, give each its own topic for better quality." })),
@@ -35,7 +35,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
     promptSnippet: "compress({ content: [{ startId, endId, summary }] }) or batch multiple ranges",
     promptGuidelines: [
-      "Each message is tagged with a [mNNNNN] ref. Compress ranges by their refs.",
+      "Each message has an acp tag with its mNNNNN ref, token size, and type. Compress ranges by their refs.",
       "Batch multiple unrelated ranges in one call — each gets its own topic and summary.",
       "Write dense, self-contained summaries — preserve file paths, signatures, errors, and decisions verbatim.",
       "Never compress content the current step is actively using.",
