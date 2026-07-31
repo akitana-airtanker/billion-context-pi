@@ -103,7 +103,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
-    debug.event("context-out", { outMsgs: out.length, injected: turn.nudge?.shouldInject ?? false });
+      debug.event("context-out", { outMsgs: out.length, injected: turn.nudge?.shouldInject ?? false });
     if (turn.nudge?.shouldInject) {
       const rendered = renderNudgeText(turn.nudge);
       const lines = [rendered.text];

@@ -10,7 +10,7 @@ type AnyMessage = {
   toolCallId?: string;
 };
 
-const REF_TAG = /^<acp\s[^>]*>m\d{5}<\/acp>\n?/;
+const REF_TAG = new RegExp("^(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\])\\s?\\n?");
 
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
