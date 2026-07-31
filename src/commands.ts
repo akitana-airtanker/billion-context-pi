@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+import { defaultCountTokens } from "acp-kernel";
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
@@ -9,7 +9,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp",
       options: {
-        description: "Show ACP context usage and compression status.",
+        description: "Show ACP context usage, token breakdown, and compression status.",
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
       },
     },
@@ -60,16 +60,106 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
   ];
 }
 
+function fmtTokens(n: number): string {
+  if (n >= 1000000) return `${(n / 1000000).toFixed(1)}M`;
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}K`;
+  return String(n);
+}
+
+function bar(value: number, total: number, width: number = 20): string {
+  if (total === 0) return "";
+  const filled = Math.max(0, Math.min(width, Math.round((value / total) * width)));
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-  const coveredIds = collectCoveredMessageIds(state);
-  const tokenCount = estimateTokens(coreMessages, coveredIds);
-  const report = runtime.core.status(state, tokenCount, config);
-  const pct = (report.contextUsage * 100).toFixed(0);
-  return [
-    `ACP — context ${pct}% (${tokenCount}/${config.modelContextLimit})`,
-    `Blocks: ${report.activeBlocks} active / ${report.totalBlocks} total`,
-    `Compressed so far: ~${report.tokensCompressed} tokens`,
-  ].join("\n");
+  const tokenCount = defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
+
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+  const nudge = turn.nudge;
+  const bd = nudge?.contextBreakdown;
+  const usagePct = nudge ? Math.round(nudge.contextUsage * 100) : 0;
+  const limit = config.modelContextLimit;
+  const activeBlocksList = state.blocks.filter((b) => b.active);
+  const totalBlocksList = state.blocks;
+
+  const lines: string[] = [];
+
+  lines.push("╭─────────────────────────────────────────────╮");
+  lines.push("│           ACP Context Analysis              │");
+  lines.push("╰─────────────────────────────────────────────╯");
+  lines.push("");
+  lines.push(`Context: ${usagePct}% (${fmtTokens(tokenCount)} / ${fmtTokens(limit)})`);
+
+  if (nudge && bd) {
+    const sumTotal = bd.system + bd.tool + bd.summaries + bd.code + bd.text;
+    const growth = bd.growth;
+    if (growth > 0 && sumTotal > 0) {
+      lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
+    }
+    if (sumTotal > 0) {
+      lines.push("");
+      lines.push("Token Breakdown:");
+
+      const categories: Array<{ label: string; value: number }> = [
+        { label: "System", value: bd.system },
+        { label: "Tool", value: bd.tool },
+        { label: "Summaries", value: bd.summaries },
+        { label: "Code", value: bd.code },
+        { label: "Text", value: bd.text },
+      ];
+
+      for (const cat of categories) {
+        const pct = sumTotal > 0 ? Math.round((cat.value / sumTotal) * 100) : 0;
+        const b = bar(cat.value, sumTotal);
+        lines.push(`  ${cat.label.padEnd(10)} ${b} ${String(pct).padStart(3)}%  ${fmtTokens(cat.value)}`);
+      }
+    }
+  }
+
+  lines.push("");
+
+  if (nudge) {
+    if (nudge.shouldInject) {
+      const tierInfo = nudge.tier ? ` [T${nudge.tier} distillation]` : "";
+      lines.push(`Nudge: ACTIVE${tierInfo} — ${nudge.reason}`);
+    } else {
+      lines.push(`Nudge: idle — ${nudge.reason}`);
+    }
+  }
+
+  const ranges = nudge?.compressibleRanges ?? [];
+  if (ranges.length > 0) {
+    lines.push("");
+    lines.push(`Compressible Ranges (${ranges.length}):`);
+    for (const r of ranges.slice(0, 8)) {
+      const tools = r.toolPct > 0 ? ` (${Math.round(r.toolPct)}% tools)` : "";
+      lines.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
+    }
+    if (ranges.length > 8) {
+      lines.push(`  ...and ${ranges.length - 8} more`);
+    }
+  }
+
+  if (activeBlocksList.length > 0) {
+    lines.push("");
+    lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
+    for (const b of activeBlocksList) {
+      const topic = b.topic ? `: ${b.topic}` : "";
+      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(b.summary.length)}tok${topic}`);
+    }
+  } else if (totalBlocksList.length > 0) {
+    lines.push("");
+    lines.push(`Blocks: 0 active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
+  } else {
+    lines.push("");
+    lines.push("Blocks: none (nothing compressed yet)");
+  }
+
+  lines.push("");
+  lines.push("Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.");
+
+  return lines.join("\n");
 }
