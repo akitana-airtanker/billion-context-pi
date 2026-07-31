@@ -1,11 +1,13 @@
+import { readFile, writeFile } from "node:fs/promises";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { debug } from "./log.js";
 
-// Injected at build time by tsup (define) from package.json — single source of truth.
 declare const CURRENT_VERSION: string;
 
 const PACKAGE_NAME = "pai-acp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
-const CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
 function parseVersion(v: string): number[] {
@@ -44,6 +46,65 @@ async function writeLastCheck(timestamp: number): Promise<void> {
   }
 }
 
+type PackageJson = {
+  name?: string;
+  version?: string;
+  dependencies?: Record<string, string>;
+};
+
+async function readPackageJson(path: string): Promise<PackageJson | undefined> {
+  try {
+    const data = JSON.parse(await readFile(path, "utf-8"));
+    return data && typeof data === "object" ? (data as PackageJson) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function findNpmRoot(extDir: string): string | undefined {
+  let dir = dirname(extDir);
+  while (dir !== "/" && dir !== ".") {
+    if (dir.endsWith("node_modules")) return dirname(dir);
+    dir = dirname(dir);
+  }
+  return undefined;
+}
+
+async function findExtensionDir(): Promise<string | undefined> {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const pkg = await readPackageJson(join(dir, "package.json"));
+    if (pkg?.name === PACKAGE_NAME) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+async function autoInstallLatest(latest: string): Promise<boolean> {
+  const extDir = await findExtensionDir();
+  if (!extDir) return false;
+  const npmDir = findNpmRoot(extDir);
+  if (!npmDir) return false;
+
+  try {
+    const npmPkgPath = join(npmDir, "package.json");
+    const npmPkg = await readPackageJson(npmPkgPath);
+    if (npmPkg?.dependencies?.[PACKAGE_NAME]) {
+      npmPkg.dependencies[PACKAGE_NAME] = latest;
+      await writeFile(npmPkgPath, JSON.stringify(npmPkg, null, 2) + "\n");
+    }
+
+    const { exec } = await import("node:child_process");
+    await new Promise<void>((resolve) => {
+      exec("npm install --silent --no-audit --no-fund", { cwd: npmDir, timeout: 30_000 }, () => resolve());
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export async function checkForUpdate(
   notify?: (msg: string) => void,
 ): Promise<void> {
@@ -52,6 +113,8 @@ export async function checkForUpdate(
   if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
   await writeLastCheck(now);
+
+  const runtimeVersion = await getRuntimeVersion();
 
   try {
     const res = await fetch(REGISTRY_URL, {
@@ -63,18 +126,33 @@ export async function checkForUpdate(
     const latest = data.version;
     if (!latest) return;
 
+    const current = runtimeVersion ?? CURRENT_VERSION;
     debug.event("update-check", {
-      current: CURRENT_VERSION,
+      current,
       latest,
-      hasUpdate: isNewer(latest, CURRENT_VERSION),
+      hasUpdate: isNewer(latest, current),
     });
 
-    if (isNewer(latest, CURRENT_VERSION) && notify) {
-      notify(
-        `${PACKAGE_NAME} ${latest} is available (you have ${CURRENT_VERSION}). Run: pi update --extension npm:${PACKAGE_NAME}`,
-      );
+    if (isNewer(latest, current)) {
+      const installed = await autoInstallLatest(latest);
+      if (installed && notify) {
+        notify(
+          `\x1b[32m\u2714 ACP auto-updated ${current} \u2192 ${latest}. Restart Pi to finish.\x1b[0m`,
+        );
+      } else if (!installed && notify) {
+        notify(
+          `${PACKAGE_NAME} ${latest} available (you have ${current}). Run: pi update --extension npm:${PACKAGE_NAME}`,
+        );
+      }
     }
   } catch {
     // network error, registry down, timeout — silent
   }
+}
+
+async function getRuntimeVersion(): Promise<string | undefined> {
+  const extDir = await findExtensionDir();
+  if (!extDir) return undefined;
+  const pkg = await readPackageJson(join(extDir, "package.json"));
+  return pkg?.version;
 }
