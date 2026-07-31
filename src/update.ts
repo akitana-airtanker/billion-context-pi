@@ -71,7 +71,7 @@ export async function checkForUpdate(
 
     if (isNewer(latest, CURRENT_VERSION) && notify) {
       notify(
-        `${PACKAGE_NAME} ${latest} is available (you have ${CURRENT_VERSION}). Run: pi update --extension ${PACKAGE_NAME}`,
+        `${PACKAGE_NAME} ${latest} is available (you have ${CURRENT_VERSION}). Run: pi update --extension npm:${PACKAGE_NAME}`,
       );
     }
   } catch {
