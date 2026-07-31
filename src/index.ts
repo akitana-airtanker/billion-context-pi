@@ -9,6 +9,9 @@ import { renderNudgeText } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
+import { makeDecompressTool } from "./decompress-tool.js";
+import { makeSearchTool } from "./search-tool.js";
+import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { entriesToCoreMessages, coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -26,6 +29,9 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi);
     pi.registerTool(makeCompressTool(runtime));
+    pi.registerTool(makeDecompressTool(runtime));
+    pi.registerTool(makeSearchTool(runtime));
+    pi.registerTool(makeStatusTool(runtime));
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
     }
