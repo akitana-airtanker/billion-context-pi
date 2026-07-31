@@ -150,7 +150,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
     for (const b of activeBlocksList) {
       const topic = b.topic ? `: ${b.topic}` : "";
-      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(b.summary.length)}tok${topic}`);
+      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(Math.ceil((b.summary || "").length / 4))}tok${topic}`);
     }
   } else if (totalBlocksList.length > 0) {
     lines.push("");

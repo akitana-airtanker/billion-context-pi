@@ -146,7 +146,7 @@ test("coreOutToAgentMessages reconstructs parallel tool-call assistant message f
 
   const textBlocks = content.filter((b) => b.type === "text");
   assert.ok(textBlocks.length >= 1, "text block preserved");
-  assert.ok(textBlocks[0]!.text!.startsWith(acpRef("m00003").substring(0, 4)), "ref tag prepended");
+  assert.ok(!textBlocks[0]!.text!.includes("m00003"), "assistant message: no tag injected (skip applied)");
 });
 
 test("coreOutToAgentMessages drops pruned tool-call blocks when only some survive", () => {

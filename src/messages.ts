@@ -151,6 +151,21 @@ function reconstructToolCallMessage(
   const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
   const tag = match ? match[0] : null;
 
+  if (base.role === "assistant" || !tag) {
+    const rawBlocks2: unknown[] = Array.isArray(base.content)
+      ? base.content
+      : typeof base.content === "string"
+        ? [{ type: "text", text: base.content }]
+        : [];
+    const filtered2 = rawBlocks2.filter((block) => {
+      const b = block as { type?: string; id?: string };
+      if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
+      return true;
+    });
+    const peeled2 = peelRefTagBlocks(filtered2);
+    return { ...(original as object), content: peeled2 } as AgentMessage;
+  }
+
   const rawBlocks: unknown[] = Array.isArray(base.content)
     ? base.content
     : typeof base.content === "string"
@@ -164,9 +179,15 @@ function reconstructToolCallMessage(
   });
 
   const peeled = peelRefTagBlocks(filtered);
-  const content = tag ? [{ type: "text", text: tag }, ...peeled] : peeled;
-
-  return { ...(original as object), content } as AgentMessage;
+  const lastTextIdx = [...peeled].reverse().findIndex((b) => (b as { type?: string }).type === "text");
+  if (lastTextIdx >= 0) {
+    const idx = peeled.length - 1 - lastTextIdx;
+    const lastBlock = peeled[idx] as { type: string; text: string };
+    const baseText = lastBlock.text ?? "";
+    peeled[idx] = { ...lastBlock, text: baseText.length > 0 ? `${baseText}\n\n${tag}` : tag };
+    return { ...(original as object), content: peeled } as AgentMessage;
+  }
+  return { ...(original as object), content: [{ type: "text", text: tag }, ...peeled] } as AgentMessage;
 }
 
 function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {

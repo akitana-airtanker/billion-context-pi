@@ -5,7 +5,7 @@ const ACP_TAG_EXAMPLE = LT + 'acp tokens="2.1K" type="bash"' + GT + "m00175" + L
 export const ACP_SYSTEM_PROMPT = `
 ACP context management
 
-Each message has an ${ACP_TAG_EXAMPLE} tag showing its ref (mNNNNN), token size, and content type. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g., m00005) inside compress calls — never the XML wrapper.
+Each user and tool message has an ${ACP_TAG_EXAMPLE} tag showing its ref (mNNNNN), token size, and content type. Assistant messages are untagged — infer their refs from adjacent tagged messages. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g., m00005) inside compress calls — never the XML wrapper.
 
 You have a \`compress\` tool to reclaim context when older ranges are no longer needed for the current step.
 
