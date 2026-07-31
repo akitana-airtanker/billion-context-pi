@@ -80,8 +80,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
   const nudge = turn.nudge;
   const bd = nudge?.contextBreakdown;
-  const usagePct = nudge ? Math.round(nudge.contextUsage * 100) : 0;
   const limit = config.modelContextLimit;
+  const sumFromBd = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
+  const displayTotal = sumFromBd > 0 ? sumFromBd : tokenCount;
+  const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
   const activeBlocksList = state.blocks.filter((b) => b.active);
   const totalBlocksList = state.blocks;
 
@@ -91,10 +93,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   lines.push("│           ACP Context Analysis              │");
   lines.push("╰─────────────────────────────────────────────╯");
   lines.push("");
-  lines.push(`Context: ${usagePct}% (${fmtTokens(tokenCount)} / ${fmtTokens(limit)})`);
+  lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
 
   if (nudge && bd) {
-    const sumTotal = bd.system + bd.tool + bd.summaries + bd.code + bd.text;
+    const sumTotal = sumFromBd;
     const growth = bd.growth;
     if (growth > 0 && sumTotal > 0) {
       lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
