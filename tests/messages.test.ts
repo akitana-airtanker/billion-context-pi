@@ -32,8 +32,23 @@ function assistantToolCall(name: string): object {
     timestamp: Date.now(),
   };
 }
-function toolResult(name: string, text: string): object {
-  return { role: "toolResult", toolCallId: "tc1", toolName: name, content: [{ type: "text", text }], isError: false, timestamp: Date.now() };
+function assistantParallelToolCalls(calls: { id: string; name: string; args?: unknown }[]): object {
+  return {
+    role: "assistant",
+    content: [
+      { type: "text", text: "Running multiple tools" },
+      ...calls.map((c) => ({ type: "toolCall", id: c.id, name: c.name, arguments: c.args ?? {} })),
+    ],
+    api: "anthropic",
+    provider: "anthropic",
+    model: "m",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+    stopReason: "toolUse",
+    timestamp: Date.now(),
+  };
+}
+function toolResult(callId: string, name: string, text: string): object {
+  return { role: "toolResult", toolCallId: callId, toolName: name, content: [{ type: "text", text }], isError: false, timestamp: Date.now() };
 }
 
 test("entriesToCoreMessages projects user/assistant/toolResult roles and extracts text", () => {
@@ -41,7 +56,7 @@ test("entriesToCoreMessages projects user/assistant/toolResult roles and extract
     msgEntry("a", user("hello world")),
     msgEntry("b", userBlocks("block text")),
     msgEntry("c", assistantToolCall("read")),
-    msgEntry("d", toolResult("read", "file contents")),
+    msgEntry("d", toolResult("tc1", "read", "file contents")),
   ];
   const core = entriesToCoreMessages(entries);
 
@@ -96,4 +111,53 @@ test("coreOutToAgentMessages filters out synthetic summary messages (compress-as
 
   const out = coreOutToAgentMessages(coreOut, originalById);
   assert.equal(out.length, 0, "synthetic summary messages should be filtered out");
+});
+
+test("coreOutToAgentMessages reconstructs parallel tool-call assistant message from split core messages", () => {
+  const assistantMsg = assistantParallelToolCalls([
+    { id: "call_a", name: "read" },
+    { id: "call_b", name: "write" },
+    { id: "call_c", name: "list" },
+  ]);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const coreOut: CoreMessage[] = [
+    { id: "entry1#call_a", role: "assistant", contentType: "tool-call", toolName: "read", toolCallId: "call_a", text: "[m00003] Running multiple tools\n{}" },
+    { id: "entry1#call_b", role: "assistant", contentType: "tool-call", toolName: "write", toolCallId: "call_b", text: "[m00003] {}" },
+    { id: "entry1#call_c", role: "assistant", contentType: "tool-call", toolName: "list", toolCallId: "call_c", text: "[m00003] {}" },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out.length, 1, "3 split tool-calls merge into 1 assistant message");
+
+  const content = (out[0] as { content: Array<{ type: string; id?: string; text?: string }> }).content;
+  const toolCalls = content.filter((b) => b.type === "toolCall");
+  assert.equal(toolCalls.length, 3, "all 3 toolCall blocks preserved");
+  assert.deepEqual(toolCalls.map((b) => b.id), ["call_a", "call_b", "call_c"]);
+
+  const textBlocks = content.filter((b) => b.type === "text");
+  assert.ok(textBlocks.length >= 1, "text block preserved");
+  assert.ok(textBlocks[0]!.text!.startsWith("[m00003]"), "ref tag prepended");
+});
+
+test("coreOutToAgentMessages drops pruned tool-call blocks when only some survive", () => {
+  const assistantMsg = assistantParallelToolCalls([
+    { id: "call_a", name: "read" },
+    { id: "call_b", name: "write" },
+    { id: "call_c", name: "list" },
+  ]);
+  const originalById = new Map([["entry1", assistantMsg as SessionMessageEntry["message"]]]);
+
+  const coreOut: CoreMessage[] = [
+    { id: "entry1#call_a", role: "assistant", contentType: "tool-call", toolName: "read", toolCallId: "call_a", text: "[m00003] {}" },
+    { id: "entry1#call_c", role: "assistant", contentType: "tool-call", toolName: "list", toolCallId: "call_c", text: "[m00003] {}" },
+  ];
+
+  const out = coreOutToAgentMessages(coreOut, originalById);
+  assert.equal(out.length, 1);
+
+  const content = (out[0] as { content: Array<{ type: string; id?: string }> }).content;
+  const toolCalls = content.filter((b) => b.type === "toolCall");
+  assert.equal(toolCalls.length, 2, "only 2 surviving tool-call blocks");
+  assert.deepEqual(toolCalls.map((b) => b.id), ["call_a", "call_c"]);
 });

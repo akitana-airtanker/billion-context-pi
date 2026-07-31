@@ -109,14 +109,64 @@ export function coreOutToAgentMessages(
   coreOut: CoreMessage[],
   originalById: Map<string, AgentMessage>,
 ): AgentMessage[] {
-  return coreOut
-    .filter((core) => !core.id.startsWith("acp_summary_"))
-    .map((core) => {
+  const out: AgentMessage[] = [];
+  const emittedSplit = new Set<string>();
+
+  for (const core of coreOut) {
+    if (core.id.startsWith("acp_summary_")) continue;
+
+    const hashIdx = core.id.indexOf("#");
+    if (hashIdx < 0) {
       const original = originalById.get(core.id);
-      if (original) return patchRefTag(original, core);
-      return null;
-    })
-    .filter((m): m is AgentMessage => m !== null);
+      if (original) out.push(patchRefTag(original, core));
+      continue;
+    }
+
+    const baseId = core.id.substring(0, hashIdx);
+    if (emittedSplit.has(baseId)) continue;
+    emittedSplit.add(baseId);
+
+    const original = originalById.get(baseId);
+    if (!original) continue;
+
+    const survivingCallIds = new Set(
+      coreOut
+        .filter((c) => c.id.startsWith(`${baseId}#`) && !c.id.startsWith("acp_summary_"))
+        .map((c) => c.toolCallId)
+        .filter((id): id is string => !!id),
+    );
+
+    out.push(reconstructToolCallMessage(original, core, survivingCallIds));
+  }
+
+  return out;
+}
+
+function reconstructToolCallMessage(
+  original: AgentMessage,
+  firstCore: CoreMessage,
+  survivingCallIds: Set<string>,
+): AgentMessage {
+  const base = original as AnyMessage;
+  const match = firstCore.text ? firstCore.text.match(REF_TAG) : null;
+  const tag = match ? match[0] : null;
+
+  const rawBlocks: unknown[] = Array.isArray(base.content)
+    ? base.content
+    : typeof base.content === "string"
+      ? [{ type: "text", text: base.content }]
+      : [];
+
+  const filtered = rawBlocks.filter((block) => {
+    const b = block as { type?: string; id?: string };
+    if (b.type === "toolCall") return survivingCallIds.has(b.id ?? "");
+    return true;
+  });
+
+  const peeled = peelRefTagBlocks(filtered);
+  const content = tag ? [{ type: "text", text: tag }, ...peeled] : peeled;
+
+  return { ...(original as object), content } as AgentMessage;
 }
 
 function patchRefTag(original: AgentMessage, core: CoreMessage): AgentMessage {
@@ -148,12 +198,4 @@ function peelRefTagBlocks(blocks: unknown[]): unknown[] {
     }
   }
   return out;
-}
-
-function synthesize(core: CoreMessage): AgentMessage {
-  return {
-    role: "user",
-    content: [{ type: "text", text: core.text ?? "" }],
-    timestamp: Date.now(),
-  } as AgentMessage;
 }
