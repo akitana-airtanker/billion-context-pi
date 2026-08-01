@@ -3,14 +3,21 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { debug } from "./log.js";
 import { parseBlockIdArg, collectBlockContent } from "acp-kernel";
-import { writeFile } from "node:fs/promises";
+import { writeFile, mkdir } from "node:fs/promises";
 import { resolve, relative, isAbsolute, join } from "node:path";
 import { tmpdir } from "node:os";
+
+/** Directory for auto-generated decompress output files. */
+const AUTO_DIR = join(process.env.HOME ?? tmpdir(), ".cache", "pi", "acp-decompress");
+
+/** Maximum chars of a head preview included in the tool result for file mode. */
+const PREVIEW_CHARS = 600;
 
 const DecompressParams = Type.Object({
   blockId: Type.String({ description: 'Block id to restore, e.g. "b5".' }),
   full: Type.Optional(Type.Boolean({ description: "If true, recurse through all nested blocks to original messages. Default: false (restores one tier up — nested block summaries shown, direct messages in full)." })),
-  toFile: Type.Optional(Type.String({ description: "If provided, write the restored content to this file path (must be under /tmp or ~/.cache/opencode) instead of returning it inline." })),
+  toFile: Type.Optional(Type.String({ description: "Write restored content to this file path (must be under /tmp, ~/.cache/opencode, or ~/.cache/pi) instead of the default auto-generated path. Block stays compressed." })),
+  inline: Type.Optional(Type.Boolean({ description: "If true, return content inline as this tool's result (appends to context). Default: false — content is written to an auto-generated file to avoid context bloat. Only set true when the content is small or you accept the context cost." })),
 });
 
 type DecompressArgs = Static<typeof DecompressParams>;
@@ -20,12 +27,12 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
     name: "decompress",
     label: "Decompress",
     description:
-      "Restore a previously compressed block's content. The block stays compressed — context and cache prefix are not disrupted. By default returns content as this tool's result (appended to the conversation). Use toFile to write to a file instead. full:true recurses to original messages.",
-    promptSnippet: 'decompress({ blockId: "b5" }) or decompress({ blockId: "b5", full: true }) or decompress({ blockId: "b5", toFile: "/tmp/restore.txt" })',
+      "Restore a previously compressed block's content. The block stays compressed — context and cache prefix are not disrupted. By default writes content to an auto-generated file (avoids context bloat) and returns the path; use the read tool to access it. Pass inline:true to return content in the tool result instead. full:true recurses to original messages.",
+    promptSnippet: 'decompress({ blockId: "b5" }) — writes to file by default; decompress({ blockId: "b5", inline: true }) to return inline',
     promptGuidelines: [
       "Decompress when you need exact details lost in compression (file contents, error messages, signatures).",
-      "Content is returned as the tool result — the compressed block stays folded, so context is not disrupted.",
-      "Use toFile to write large restorations to a file (e.g. for reading back via read tool) instead of returning inline.",
+      "By default content is written to an auto-generated file — use the read tool to view it. This keeps context small.",
+      "Pass inline:true ONLY when content is small or you accept the context cost.",
       "Use full:true to recurse through all nested tiers to original messages.",
     ],
     parameters: DecompressParams,
@@ -36,24 +43,40 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
   };
 }
 
+/** Allowed roots for toFile paths. Keeps user-supplied paths from escaping to
+ *  arbitrary filesystem locations. */
+const ALLOWED_DIRS = [
+  tmpdir(),
+  join(process.env.HOME ?? "", ".cache", "opencode"),
+  join(process.env.HOME ?? "", ".cache", "pi"),
+];
+
 function resolveToFilePath(targetPath: string): string | { error: string } {
-  // Expand a leading ~ to the home dir so users can pass ~/.cache/...
   const expanded = targetPath.startsWith("~/")
     ? join(process.env.HOME ?? "", targetPath.slice(2))
     : targetPath;
   const resolved = resolve(expanded);
-  const allowedDirs = [
-    tmpdir(),
-    join(process.env.HOME ?? "", ".cache", "opencode"),
-  ];
-  const isAllowed = allowedDirs.some((dir) => {
+  const isAllowed = ALLOWED_DIRS.some((dir) => {
     const rel = relative(dir, resolved);
     return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
   });
   if (!isAllowed) {
-    return { error: `Error: toFile path must be under ${tmpdir()} or ~/.cache/opencode/. Got: ${targetPath}` };
+    return { error: `Error: toFile path must be under ${tmpdir()}, ~/.cache/opencode, or ~/.cache/pi. Got: ${targetPath}` };
   }
   return resolved;
+}
+
+/** Generate a unique auto file path for a block. Uses a timestamp so repeated
+ *  decompressions of the same block never overwrite each other. */
+function autoFilePath(blockId: string): string {
+  // blockId already carries the "b" prefix (e.g. "b5"); use it as-is so the
+  // filename reads "b5-<ts>.txt" rather than "bb5-<ts>.txt".
+  return join(AUTO_DIR, `${blockId}-${Date.now()}.txt`);
+}
+
+function headPreview(text: string): string {
+  if (text.length <= PREVIEW_CHARS) return text;
+  return text.slice(0, PREVIEW_CHARS) + "\n\n... (truncated; use read tool for full content)";
 }
 
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
@@ -72,16 +95,33 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
 
   if (count === 0) return `Block ${blockId} has no restorable message content.`;
 
-  debug.event("decompress", { blockId, full, count, toFile: Boolean(args.toFile) });
-
-  // toFile: write the collected content to a file. The block stays compressed;
-  // nothing is appended to the conversation beyond a short confirmation.
-  if (args.toFile) {
-    const resolved = resolveToFilePath(args.toFile);
-    if (typeof resolved === "object" && "error" in resolved) return resolved.error;
-    await writeFile(resolved, text, "utf8");
-    return `Wrote block ${blockId} (${count} item${count === 1 ? "" : "s"}) to ${resolved}`;
+  // inline mode: return content directly. Model explicitly accepts the context
+  // cost (e.g. small restorations or when it must reason over exact text).
+  if (args.inline === true && !args.toFile) {
+    debug.event("decompress", { blockId, full, count, mode: "inline" });
+    return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}`;
   }
 
-  return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}):\n\n${text}`;
+  // file mode (default): write to disk. Determined path is either the explicit
+  // toFile or an auto-generated location. The block stays compressed; only a
+  // short path + preview is added to the conversation.
+  const targetPath = args.toFile
+    ? resolveToFilePath(args.toFile)
+    : autoFilePath(blockId);
+  if (typeof targetPath === "object" && "error" in targetPath) return targetPath.error;
+
+  await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
+  await writeFile(targetPath, text, "utf8");
+
+  debug.event("decompress", { blockId, full, count, mode: "file", path: targetPath, chars: text.length });
+
+  const itemWord = count === 1 ? "item" : "items";
+  const lines = [
+    `Block ${blockId} (${count} ${itemWord}, ${text.length} chars) written to ${targetPath}.`,
+    "Block stays compressed — context unchanged. Use the read tool to access the content.",
+  ];
+  // A short head preview lets the model decide whether the content is worth
+  // reading without forcing a second round-trip for small restorations.
+  lines.push("", "Preview:", headPreview(text));
+  return lines.join("\n");
 }
