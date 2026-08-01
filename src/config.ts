@@ -14,10 +14,9 @@ export interface AdapterConfig {
 }
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
-  // Env override (ACP_MODEL_CONTEXT_LIMIT) takes precedence — useful for forcing
-  // compression to trigger early during observation/testing.
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
+  const FALLBACK_LIMIT = 150_000;
   const limit =
     !Number.isNaN(envLimitNum) && envLimitNum > 0
       ? envLimitNum
@@ -25,7 +24,7 @@ export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number):
         ? adapter.modelContextLimit
         : liveContextLimit > 0
           ? liveContextLimit
-          : 200000;
+          : FALLBACK_LIMIT;
   return defaultConfig(limit, {
     protectedTools: adapter.protectedTools ?? [],
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
