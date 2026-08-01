@@ -1,24 +1,19 @@
 # pai-acp
 
-[ACP](https://github.com/ranxianglei/opencode-acp) (Active Context Pruning) for the [Pi](https://pi.dev) coding agent. Gives Pi model-driven context management: a `compress` tool that lets the LLM decide when and what to compress into summaries, instead of hard-truncating.
+**Active Context Pruning for [Pi](https://pi.dev)** — model-driven context compression that keeps long conversations flowing without losing important details.
 
-Built on [`acp-kernel`](https://github.com/ranxianglei/acp-kernel#readme) — the platform-agnostic, MIT-licensed context-compression engine.
+[![npm version](https://img.shields.io/npm/v/pai-acp.svg)](https://www.npmjs.com/package/pai-acp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## How it works
+## Why?
 
-Pi fires a `context` event before every LLM call. This extension runs acp-kernel's pipeline on the active session branch and returns the transformed messages:
+When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **ACP** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
 
-1. **assign refs** — tag every message `[mNNNNN]` (single source of truth)
-2. **sync blocks** — deactivate orphaned compression blocks
-3. **merge** — fuse accumulated old-gen blocks into a single summary
-4. **prune** — replace compressed ranges with summary blocks
-5. **filter** — pluggable message filters (e.g. drop verbose consumed tool output)
-6. **hide compress calls** — fold historical `compress` tool calls out of view
-7. **nudge** — when context grows past threshold, prompt the model to compress
-8. **emergency truncate** — last safety valve if context still nears the limit
-9. **render refs** — refresh `[mNNNNN]` tags from state
-
-Pi's own auto-compaction is cancelled (`session_before_compact → { cancel: true }`) so ACP is the sole context manager.
+Unlike Pi's built-in auto-compaction (which replaces everything with a single summary), ACP:
+- **Preserves structure** — compressed ranges become labeled blocks you can decompress later
+- **Multi-tier** — summaries can be further distilled (T1 → T2 → T3) as sessions grow
+- **Searchable** — `search_context` finds information inside compressed blocks without decompressing
+- **Selective** — protected tools, user messages, and file patterns are never compressed
 
 ## Install
 
@@ -26,11 +21,68 @@ Pi's own auto-compaction is cancelled (`session_before_compact → { cancel: tru
 pi install npm:pai-acp
 ```
 
-Or clone into `~/.pi/agent/extensions/` / `.pi/extensions/` and run `npm i && npm run build`.
+That's it. The extension auto-loads on next Pi startup. No configuration needed — it reads your model's context window automatically.
+
+## How it works
+
+ACP intercepts Pi's `context` event (fired before each LLM call) and runs a 9-stage pipeline:
+
+```
+assign refs → sync blocks → merge → prune → filter → hide calls → nudge → truncate → render
+```
+
+Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible to the model but not the user. The model uses these refs to specify compression ranges.
+
+Pi's built-in auto-compaction is cancelled — ACP is the sole context manager.
+
+## Features
+
+### 4 model-facing tools
+
+| Tool | What it does |
+|------|-------------|
+| `compress` | Replace a contiguous message range with a detailed summary |
+| `decompress` | Restore a previously compressed block's content |
+| `search_context` | Search compressed block summaries by keyword (find info without decompressing) |
+| `acp_status` | Show context usage, compressed blocks, compressible ranges |
+
+### `/acp` command
+
+Rich status display for the user:
+
+```
+╭─────────────────────────────────────────────╮
+│           ACP Context Analysis              │
+╰─────────────────────────────────────────────╯
+ pai-acp@0.1.3
+
+Context: 12% (120K / 1.0M)
+Growth: +15K since last nudge
+
+Token Breakdown:
+  System     ░░░░░░░░░░░░░░░░░░░░   2%  2.1K
+  Tool       ████████████░░░░░░░░  58%  69.6K
+  Summaries  ████░░░░░░░░░░░░░░░░  20%  24.0K
+  Code       ██░░░░░░░░░░░░░░░░░░  10%  12.0K
+  Text       █░░░░░░░░░░░░░░░░░░░   5%  6.0K
+
+Blocks: 3 active (3.7K summary, 15.2K original compressed)
+  b1 (T1)  3.7K→599  age=5m  "API exploration"
+  b2 (T1)  8.2K→2.1K  age=2m  "Debug session"
+  b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
+```
+
+### Auto-update
+
+On each Pi startup, pai-acp checks npm for a newer version and auto-installs it. No manual updates needed — just restart Pi.
+
+### Compression philosophy in system prompt
+
+The model receives detailed guidance on **when** to compress, **what** to keep verbatim (paths, signatures, errors, decisions), and **what** to drop (verbose logs, duplicates, consumed exploration).
 
 ## Configuration
 
-Defaults work out of the box. The extension reads `ctx.model.contextWindow` live each turn. To override, create the extension with options (in code):
+Defaults work out of the box. For advanced customization:
 
 ```ts
 import { createAcpExtension } from "pai-acp";
@@ -39,47 +91,17 @@ export default createAcpExtension({
   modelContextLimit: 200_000,
   protectedTools: ["skill", "task"],
   preserveRecentMessages: 20,
+  nudge: {
+    minContextLimitPct: 0.45,    // start nudging at 45% usage
+    emergencyThresholdPct: 0.80,  // force compress at 80%
+  },
 });
 ```
 
-## Commands
+## Built on acp-kernel
 
-Pi commands are flat (no subcommands), so ACP exposes:
-
-| Command | Action |
-|---------|--------|
-| `/acp` `/acp-status` | Show context usage and compression stats |
-| `/acp-decompress b3` | Restore a compressed block's summary |
-| `/acp-search auth token` | Search compressed block summaries |
-
-## The compress tool
-
-The model calls it to reclaim context:
-
-```
-compress({
-  content: [
-    { startId: "m00005", endId: "m00020", summary: "...", topic: "API exploration" }
-  ]
-})
-```
-
-`startId` / `endId` are the `[mNNNNN]` refs of a contiguous range. The summary replaces the range — it should be self-contained (preserve paths, signatures, errors, decisions).
-
-## Status
-
-Experimental v1. Validated against Pi's type surface (typecheck + build clean), unit-tested for message conversion + state persistence, and **load-validated against real Pi v0.83.0** (`pi install` discovers the package; Pi initializes the extension and reaches the model-auth phase with no load/parse errors). The `typebox` schema library is bundled into `dist/index.js` — no runtime `typebox` dependency.
-
-Full message-transform E2E (the `context` event actually transforming messages in a live turn + the `compress` tool being invoked by the model) still pending a model API key.
-
-Known v1 limitations:
-- Whether the registered `compress` tool lands in the model's active tool set by default — pending live-model E2E (`setActiveTools` would replace the whole set, so it is not called).
-- Assistant messages with both text and tool calls project only the text (full block fidelity is a v2 goal).
+The compression engine is [`acp-kernel`](https://github.com/ranxianglei/acp-kernel) — a platform-agnostic, MIT-licensed library with 184 tests. It's bundled inline into `dist/index.js`, so there are zero runtime dependencies.
 
 ## License
 
 MIT.
-
-### v0.1.2 — CI release test
-
-Test release to verify automated npm publishing workflow after grep fix.
