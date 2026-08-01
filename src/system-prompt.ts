@@ -18,7 +18,7 @@ TOOLS
 You have four context-management tools:
 
 - compress — Replace a contiguous range of older conversation with a single detailed summary you write. Use when content is genuinely consumed (no longer needed for the current task step). Single range: compress({ content: [{ startId: "m00150", endId: "m00220", summary: "..." }] }). Batch (multiple unrelated ranges, each with its own topic): compress({ content: [{ topic: "Auth", startId: "m00150", endId: "m00220", summary: "..." }, { topic: "Deploy", startId: "m00300", endId: "m00350", summary: "..." }] }).
-- decompress — Restore a previously compressed block's content. By default restores one tier up (T2 shows T1 summaries, not raw messages). Use full: true to restore all the way to original messages. Use toFile to write to file instead of inflating context. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", full: true }).
+- decompress — Restore a previously compressed block's content. By default restores one tier up (T2 shows T1 summaries, not raw messages). Use full: true to restore all the way to original messages. Use toFile to write restored content to a file (under /tmp or ~/.cache/opencode) instead of inflating context. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", full: true }) or decompress({ blockId: "b5", toFile: "/tmp/b5.txt" }).
 - search_context — Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
 - acp_status — Context status with compressible ranges. No args = overview + totals. scope:"uncompressed" for range view; add view:"messages" for per-message listing. scope:"compressed" for block details.
 
