@@ -79,3 +79,7 @@ Known v1 limitations:
 ## License
 
 MIT.
+
+### v0.1.2 — CI release test
+
+Test release to verify automated npm publishing workflow after grep fix.
