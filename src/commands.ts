@@ -99,8 +99,14 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const nudge = turn.nudge;
   const bd = nudge?.contextBreakdown;
   const limit = config.modelContextLimit;
-  const sumFromBd = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
-  const displayTotal = sumFromBd > 0 ? sumFromBd : tokenCount;
+  // displayTotal must reflect the REAL context size (what the footer shows),
+  // not just the sum of message-text categories. contextBreakdown only
+  // classifies message text via chars/4 and never sees pi's system prompt
+  // or tool schemas, so summing its fields undercounts by ~the framework
+  // overhead. Use the real tokenCount; show the gap as "framework".
+  const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
+  const framework = bd ? Math.max(0, tokenCount - classified) : 0;
+  const displayTotal = tokenCount;
   const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
   const activeBlocksList = state.blocks.filter((b) => b.active);
   const totalBlocksList = state.blocks;
@@ -117,26 +123,27 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
 
   if (nudge && bd) {
-    const sumTotal = sumFromBd;
     const growth = bd.growth;
-    if (growth > 0 && sumTotal > 0) {
+    if (growth > 0 && displayTotal > 0) {
       lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
     }
-    if (sumTotal > 0) {
+    if (displayTotal > 0) {
       lines.push("");
       lines.push("Token Breakdown:");
 
       const categories: Array<{ label: string; value: number }> = [
-        { label: "System", value: bd.system },
         { label: "Tool", value: bd.tool },
-        { label: "Summaries", value: bd.summaries },
-        { label: "Code", value: bd.code },
+        { label: "Framework", value: framework },
         { label: "Text", value: bd.text },
+        { label: "Code", value: bd.code },
+        { label: "Summaries", value: bd.summaries },
+        { label: "System", value: bd.system },
       ];
 
       for (const cat of categories) {
-        const pct = sumTotal > 0 ? Math.round((cat.value / sumTotal) * 100) : 0;
-        const b = bar(cat.value, sumTotal);
+        if (cat.value <= 0) continue;
+        const pct = displayTotal > 0 ? Math.round((cat.value / displayTotal) * 100) : 0;
+        const b = bar(cat.value, displayTotal);
         lines.push(`  ${cat.label.padEnd(10)} ${b} ${String(pct).padStart(3)}%  ${fmtTokens(cat.value)}`);
       }
     }
