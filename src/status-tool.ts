@@ -2,7 +2,6 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -36,8 +35,6 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
-  const coveredIds = collectCoveredMessageIds(state);
-  void estimateTokens(coreMessages, coveredIds);
 
   return buildStatusReport(state, coreMessages, defaultCountTokens, {
     scope: args.scope,

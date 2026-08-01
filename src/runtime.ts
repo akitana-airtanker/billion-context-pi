@@ -1,4 +1,4 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionContext, SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   createCore,
   defaultCountTokens,
@@ -16,7 +16,7 @@ export interface AcpRuntime {
   adapter: AdapterConfig;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
-  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages> }>;
+  stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
 }
@@ -53,7 +53,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     const sm = ctx.sessionManager;
     const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
     const entries = sm.buildContextEntries();
-    return { state, coreMessages: entriesToCoreMessages(entries) };
+    return { state, coreMessages: entriesToCoreMessages(entries), entries };
   }
 
   async function save(state: CompressionState, ctx: ExtensionContext) {

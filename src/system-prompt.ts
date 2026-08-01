@@ -1,7 +1,3 @@
-const LT = "\x3c";
-const GT = "\x3e";
-const ACP_TAG_EXAMPLE = LT + 'acp tokens="2.1K" type="bash"' + GT + "m00175" + LT + "/acp" + GT;
-
 export const ACP_SYSTEM_PROMPT = `
 ACP context management
 

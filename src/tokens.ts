@@ -1,4 +1,4 @@
-import type { CoreMessage } from "acp-kernel";
+import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 
 export function collectCoveredMessageIds(state: { blocks: { active: boolean; effectiveMessageIds: string[] }[] }): Set<string> {
   const ids = new Set<string>();
@@ -10,11 +10,11 @@ export function collectCoveredMessageIds(state: { blocks: { active: boolean; eff
 }
 
 export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>): number {
-  let chars = 0;
+  let tokens = 0;
   for (const m of messages) {
     if (m.toolName === "compress") continue;
     if (coveredIds?.has(m.id)) continue;
-    chars += m.text?.length ?? 0;
+    tokens += defaultCountTokens(m.text ?? "");
   }
-  return Math.ceil(chars / 4);
+  return tokens;
 }
