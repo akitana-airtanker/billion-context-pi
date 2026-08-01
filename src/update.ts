@@ -12,6 +12,10 @@ const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
+// Guards against concurrent checks: the context event fires on every LLM call,
+// so several can race past the throttle read before any writes the timestamp.
+let updateInFlight = false;
+
 function parseVersion(v: string): number[] {
   return v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
 }
@@ -118,15 +122,17 @@ export async function checkForUpdate(
   ) {
     return;
   }
-  const now = Date.now();
-  const lastCheck = await readLastCheck();
-  if (now - lastCheck < CHECK_INTERVAL_MS) return;
-
-  await writeLastCheck(now);
-
-  const runtimeVersion = await getRuntimeVersion();
-
+  if (updateInFlight) return;
+  updateInFlight = true;
   try {
+    const now = Date.now();
+    const lastCheck = await readLastCheck();
+    if (now - lastCheck < CHECK_INTERVAL_MS) return;
+
+    await writeLastCheck(now);
+
+    const runtimeVersion = await getRuntimeVersion();
+
     const res = await fetch(REGISTRY_URL, {
       signal: AbortSignal.timeout(5000),
       headers: { Accept: "application/json" },
@@ -157,6 +163,8 @@ export async function checkForUpdate(
     }
   } catch {
     // network error, registry down, timeout — silent
+  } finally {
+    updateInFlight = false;
   }
 }
 

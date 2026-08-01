@@ -158,6 +158,13 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // Always return the transformed array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
     debug.event("context-out", { outMsgs: rebuilt.length, injected: turn.nudge?.shouldInject ?? false, emergency: turn.nudge?.breakdown?.emergencyOverride === 1 });
+    // Also check for updates here (not only on session_start): resuming a
+    // long-running session never re-fires session_start, so an update could
+    // go unnoticed for days. checkForUpdate throttles internally (3 min) and
+    // is guarded against concurrent calls, so firing it per LLM call is safe.
+    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
+      if (ctx.hasUI) ctx.ui.notify(msg);
+    });
     return { messages: rebuilt };
     } finally {
       release();
