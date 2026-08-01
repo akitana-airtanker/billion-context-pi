@@ -1,12 +1,8 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { buildStatusReport, defaultCountTokens } from "acp-kernel";
+import { buildStatusReport, defaultCountTokens, formatRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
-
-function fmtTokens(n: number): string {
-  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
-}
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -71,6 +67,7 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
 
   const nudge = turn.nudge;
   const ranges = nudge?.compressibleRanges ?? [];
+  const protectedRanges = nudge?.protectedRanges ?? [];
 
   const extra: string[] = [];
   if (nudge) {
@@ -81,13 +78,12 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
         : `Nudge: idle — ${nudge.reason}`,
     );
   }
-  if (ranges.length > 0) {
+  if (ranges.length > 0 || protectedRanges.length > 0) {
     extra.push("");
-    extra.push(`Compressible Ranges (${ranges.length}):`);
-    for (const r of ranges) {
-      const tools = r.toolPct > 0 ? ` (${Math.round(r.toolPct)}% tools)` : "";
-      extra.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
-    }
+    // Reuse the kernel's merged range formatter so acp_status, the nudge,
+    // and /acp all render compressible+protected ranges identically
+    // (merged oldest-first, with mixed-range breakdowns).
+    extra.push(formatRanges(ranges, protectedRanges));
   }
   return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
