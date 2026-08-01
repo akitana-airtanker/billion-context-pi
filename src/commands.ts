@@ -102,10 +102,13 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // displayTotal must reflect the REAL context size (what the footer shows),
   // not just the sum of message-text categories. contextBreakdown only
   // classifies message text via chars/4 and never sees pi's system prompt
-  // or tool schemas, so summing its fields undercounts by ~the framework
-  // overhead. Use the real tokenCount; show the gap as "framework".
+  // or tool schemas, so summing its fields undercounts. Split the gap into
+  // the real system prompt (measured) and the rest (tool schemas + the
+  // inevitable chars/4-vs-real-tokenizer drift).
   const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
-  const framework = bd ? Math.max(0, tokenCount - classified) : 0;
+  const systemPromptText = ctx.getSystemPrompt?.() ?? "";
+  const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
+  const framework = bd ? Math.max(0, tokenCount - classified - systemPromptTokens) : 0;
   const displayTotal = tokenCount;
   const displayPct = limit > 0 ? Math.round((displayTotal / limit) * 100) : 0;
   const activeBlocksList = state.blocks.filter((b) => b.active);
@@ -133,11 +136,11 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
       const categories: Array<{ label: string; value: number }> = [
         { label: "Tool", value: bd.tool },
+        { label: "SysPrompt", value: systemPromptTokens },
         { label: "Framework", value: framework },
         { label: "Text", value: bd.text },
         { label: "Code", value: bd.code },
         { label: "Summaries", value: bd.summaries },
-        { label: "System", value: bd.system },
       ];
 
       for (const cat of categories) {
