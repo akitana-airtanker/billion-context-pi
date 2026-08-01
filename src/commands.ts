@@ -89,7 +89,11 @@ function bar(value: number, total: number, width: number = 20): string {
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-  const tokenCount = defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
+  // Use pi's real context usage (anchored on provider usage) instead of a
+  // chars/4 estimate — matches the footer percentage and the nudge decision
+  // the context transform computes.
+  const realUsage = ctx.getContextUsage?.();
+  const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
 
   const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
   const nudge = turn.nudge;
