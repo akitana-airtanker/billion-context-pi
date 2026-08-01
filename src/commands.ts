@@ -2,6 +2,8 @@ import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens } from "acp-kernel";
 
+declare const CURRENT_VERSION: string;
+
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
 export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
@@ -89,9 +91,12 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
   const lines: string[] = [];
 
+  const versionStr = CURRENT_VERSION ? `pai-acp@${CURRENT_VERSION}` : "";
+
   lines.push("╭─────────────────────────────────────────────╮");
   lines.push("│           ACP Context Analysis              │");
   lines.push("╰─────────────────────────────────────────────╯");
+  if (versionStr) lines.push(versionStr);
   lines.push("");
   lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
 
