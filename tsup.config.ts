@@ -19,6 +19,6 @@ export default defineConfig({
     "@earendil-works/pi-coding-agent",
     "@earendil-works/pi-ai",
     "@earendil-works/pi-agent-core",
-    "typebox",
   ],
+  noExternal: ["typebox"],
 });
