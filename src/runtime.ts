@@ -20,6 +20,9 @@ export interface AcpRuntime {
    *  every context event (pi fires multiple per assistant reply). */
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
+  /** Clear per-turn nudge tracking. Called on session_start so the Set does not
+   *  grow unbounded across sessions in a long-lived Pi process. */
+  clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
@@ -73,5 +76,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
 }

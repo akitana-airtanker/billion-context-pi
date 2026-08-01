@@ -50,13 +50,14 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
+    runtime.clearNudgeTracking();
     // Load user config (~/.pi/acp.json + project .pi/acp.json) and apply it so
     // debug/terminalNudge/autoUpdate/modelContextLimit are runtime-configurable
     // without env vars or reinstalling.
     try {
       const user = await loadUserConfig(ctx.cwd);
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
-      if (runtime.adapter.debug === true) setDebugEnabled(true);
+      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch {
       // best-effort — fall back to factory/env config
     }
