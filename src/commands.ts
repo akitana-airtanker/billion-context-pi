@@ -1,7 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { defaultCountTokens, parseBlockIdArg, formatRanges } from "acp-kernel";
-import { collectRestoredContent } from "./decompress-tool.js";
+import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
 
 declare const CURRENT_VERSION: string;
 
@@ -39,7 +38,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
             ctx.ui.notify(`Block ${blockId} not found.`);
             return;
           }
-          const { text, count } = collectRestoredContent(block, coreMessages, state, false);
+          const { text, count } = collectBlockContent(state, block, coreMessages, { full: false });
           if (count === 0) {
             ctx.ui.notify(`Block ${blockId} has no restorable message content.`);
             return;
