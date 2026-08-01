@@ -2,12 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { estimateTokens } from "../src/tokens.js";
 
-test("estimateTokens matches kernel defaultCountTokens (word-based, not chars/4)", () => {
+test("estimateTokens matches kernel defaultCountTokens (CJK 1:1 + chars/4)", () => {
   const msgs = [
     { id: "m1", role: "user", contentType: "text", text: "hello world foo bar baz" },
   ];
-  // defaultCountTokens counts ascii words: 5 — chars/4 would give 2
-  assert.equal(estimateTokens(msgs), 5);
+  // defaultCountTokens (acp-kernel 0.0.7+): CJK 1:1 + non-CJK chars/4.
+  // 24 non-CJK chars → ceil(24/4) = 6
+  assert.equal(estimateTokens(msgs), 6);
 });
 
 test("estimateTokens is consistent with kernel counter for CJK (each char = 1 token)", () => {
@@ -23,8 +24,8 @@ test("estimateTokens skips compress tool calls", () => {
     { id: "m2", role: "assistant", contentType: "tool-call", toolName: "compress", text: "ignored payload here" },
     { id: "m3", role: "user", contentType: "text", text: "delta epsilon" },
   ];
-  // m1 (3) + skip m2 (compress) + m3 (2) = 5
-  assert.equal(estimateTokens(msgs), 5);
+  // m1 (4) + skip m2 (compress) + m3 (4) = 8
+  assert.equal(estimateTokens(msgs), 8);
 });
 
 test("estimateTokens skips covered (already-compressed) message ids", () => {
@@ -33,6 +34,6 @@ test("estimateTokens skips covered (already-compressed) message ids", () => {
     { id: "m3", role: "user", contentType: "text", text: "delta epsilon" },
   ];
   const covered = new Set(["m3"]);
-  // m1 (3) + skip m3 (covered) = 3
-  assert.equal(estimateTokens(msgs, covered), 3);
+  // m1 (4) + skip m3 (covered) = 4
+  assert.equal(estimateTokens(msgs, covered), 4);
 });
