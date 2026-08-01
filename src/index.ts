@@ -13,7 +13,7 @@ import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
-import { entriesToCoreMessages, coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
 import { debug } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
@@ -49,7 +49,7 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", (_event, ctx) => {
     runtime.store.invalidate();
-    void checkForUpdate((msg) => {
+    void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
   });
@@ -63,12 +63,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
-      const entries = ctx.sessionManager.buildContextEntries();
-      const coreMessages = entriesToCoreMessages(entries);
-      const state = await runtime.store.load(
-        ctx.sessionManager.getSessionFile() ?? undefined,
-        sid,
-      );
+      const { state, coreMessages, entries } = await runtime.stateFor(ctx);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
       const tokenCount = estimateTokens(coreMessages, coveredIds);

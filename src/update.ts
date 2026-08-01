@@ -1,6 +1,7 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { exec } from "node:child_process";
 import { debug } from "./log.js";
 
 declare const CURRENT_VERSION: string;
@@ -26,8 +27,7 @@ function isNewer(latest: string, current: string): boolean {
 
 async function readLastCheck(): Promise<number> {
   try {
-    const fs = await import("node:fs/promises");
-    const data = await fs.readFile(THROTTLE_FILE, "utf-8");
+    const data = await readFile(THROTTLE_FILE, "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
@@ -36,11 +36,8 @@ async function readLastCheck(): Promise<number> {
 
 async function writeLastCheck(timestamp: number): Promise<void> {
   try {
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    const dir = path.dirname(THROTTLE_FILE);
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
+    await mkdir(dirname(THROTTLE_FILE), { recursive: true });
+    await writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
   } catch {
     // best-effort
   }
@@ -88,26 +85,34 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
   if (!npmDir) return false;
 
   try {
-    const npmPkgPath = join(npmDir, "package.json");
-    const npmPkg = await readPackageJson(npmPkgPath);
-    if (npmPkg?.dependencies?.[PACKAGE_NAME]) {
-      npmPkg.dependencies[PACKAGE_NAME] = latest;
-      await writeFile(npmPkgPath, JSON.stringify(npmPkg, null, 2) + "\n");
-    }
-
-    const { exec } = await import("node:child_process");
-    await new Promise<void>((resolve) => {
-      exec("npm install --silent --no-audit --no-fund", { cwd: npmDir, timeout: 30_000 }, () => resolve());
+    const code = await new Promise<number>((resolve) => {
+      exec(
+        `npm install ${PACKAGE_NAME}@${latest} --silent --no-audit --no-fund`,
+        { cwd: npmDir, timeout: 60_000 },
+        (err) => {
+          if (!err) return resolve(0);
+          const exit = (err as NodeJS.ErrnoException & { code?: number }).code;
+          resolve(typeof exit === "number" ? exit : 1);
+        },
+      );
     });
-    return true;
+    return code === 0;
   } catch {
     return false;
   }
 }
 
 export async function checkForUpdate(
+  autoUpdate: boolean,
   notify?: (msg: string) => void,
 ): Promise<void> {
+  if (
+    !autoUpdate ||
+    process.env.ACP_AUTO_UPDATE === "0" ||
+    process.env.ACP_AUTO_UPDATE === "false"
+  ) {
+    return;
+  }
   const now = Date.now();
   const lastCheck = await readLastCheck();
   if (now - lastCheck < CHECK_INTERVAL_MS) return;
