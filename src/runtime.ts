@@ -15,6 +15,11 @@ export interface AcpRuntime {
   store: SessionStateStore;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
+  /** Record that a nudge was already shown for the turn keyed by last user msg
+   *  id, so a tier/growth nudge prints at most once per turn instead of on
+   *  every context event (pi fires multiple per assistant reply). */
+  markNudgeShown(turnKey: string): void;
+  nudgeShownFor(turnKey: string): boolean;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   stateFor(ctx: ExtensionContext): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
@@ -27,6 +32,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
   let adapterRef = adapter;
+  const nudgeShownTurns = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -67,5 +73,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), liveContextLimit, configFor, stateFor, save, acquireLock };
 }
