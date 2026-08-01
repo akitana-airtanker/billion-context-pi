@@ -16,7 +16,7 @@ import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
 import { debug, setDebugEnabled } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 
@@ -124,23 +124,36 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const terminalNudge = runtime.adapter.terminalNudge ?? true;
 
     if (turn.nudge?.shouldInject) {
-      const rendered = renderNudgeText(turn.nudge);
-      const lines = [rendered.text];
-      const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-      if (top) {
-        lines.push("", `Example: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })`);
-      }
-      const text = lines.join("\n");
-      if (terminalNudge) {
-        // Print to the user terminal only — the model never sees this. Mirrors
-        // opencode-acp's ignored-part injection: surface the nudge without
-        // spending model context on it.
-        if (ctx.hasUI) ctx.ui.notify(text);
+      // Emergency nudges (usage >= 80%) print every time — they are overflow
+      // warnings the user must always see. Other nudges (tier distillation,
+      // growth) print at most once per turn: pi fires the context event
+      // multiple times per assistant reply (streaming/tool loop), and without
+      // this gate a tier-2 nudge would spam the terminal on every event.
+      const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
+      const turnKey = lastUserMessageId(entries) ?? sid;
+      const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
+      if (!alreadyShown) {
+        const rendered = renderNudgeText(turn.nudge);
+        const lines = [rendered.text];
+        const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
+        if (top) {
+          lines.push("", `Example: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })`);
+        }
+        const text = lines.join("\n");
+        if (terminalNudge) {
+          // Print to the user terminal only — the model never sees this. Mirrors
+          // opencode-acp's ignored-part injection: surface the nudge without
+          // spending model context on it.
+          if (ctx.hasUI) ctx.ui.notify(text);
+        } else {
+          // Legacy: inject as a context message the model can act on.
+          rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
+        }
+        if (!emergency) runtime.markNudgeShown(turnKey);
+        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channel: terminalNudge ? "terminal" : "context", emergency, turnKey, text });
       } else {
-        // Legacy: inject as a context message the model can act on.
-        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
       }
-      debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channel: terminalNudge ? "terminal" : "context", text });
     }
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
