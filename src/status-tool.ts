@@ -2,6 +2,11 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens } from "acp-kernel";
+import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
+
+function fmtTokens(n: number): string {
+  return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -36,11 +41,42 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
 async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
 
-  return buildStatusReport(state, coreMessages, defaultCountTokens, {
+  const base = buildStatusReport(state, coreMessages, defaultCountTokens, {
     scope: args.scope,
     view: args.view,
     tool: args.tool,
     sort: args.sort,
     limit: args.limit,
   });
+
+  // Overview mode additionally surfaces the nudge decision and compressible
+  // ranges — the same info the /acp slash command shows. Drill-down modes
+  // (scope: compressed/uncompressed) return the base report as-is.
+  if (args.scope) return base;
+
+  const config = runtime.configFor(ctx);
+  const coveredIds = collectCoveredMessageIds(state);
+  const tokenCount = estimateTokens(coreMessages, coveredIds);
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+  const nudge = turn.nudge;
+  const ranges = nudge?.compressibleRanges ?? [];
+
+  const extra: string[] = [];
+  if (nudge) {
+    extra.push("");
+    extra.push(
+      nudge.shouldInject
+        ? `Nudge: ACTIVE — ${nudge.reason}`
+        : `Nudge: idle — ${nudge.reason}`,
+    );
+  }
+  if (ranges.length > 0) {
+    extra.push("");
+    extra.push(`Compressible Ranges (${ranges.length}):`);
+    for (const r of ranges) {
+      const tools = r.toolPct > 0 ? ` (${Math.round(r.toolPct)}% tools)` : "";
+      extra.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
+    }
+  }
+  return extra.length > 0 ? `${base}\n${extra.join("\n")}` : base;
 }
