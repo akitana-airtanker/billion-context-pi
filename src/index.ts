@@ -77,7 +77,14 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const { state, coreMessages, entries } = await runtime.stateFor(ctx);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);
-      const tokenCount = estimateTokens(coreMessages, coveredIds);
+      // Prefer pi's real token count (anchored on provider usage) over our
+      // chars/4 estimate — it includes the system prompt, tool schemas, and
+      // trailing messages pi has not yet received a usage for. This is what the
+      // footer percentage reflects, so nudge usage/growth will match what the
+      // user sees.
+      const realUsage = ctx.getContextUsage?.();
+      const estimated = estimateTokens(coreMessages, coveredIds);
+      const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimated;
 
       debug.event("context-in", {
         sid,
@@ -85,6 +92,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         entries: entries.length,
         coreMsgs: coreMessages.length,
         tokenCount,
+        estimatedTokens: estimated,
+        realTokens: realUsage?.tokens ?? null,
+        realPercent: realUsage?.percent ?? null,
         limit: config.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,

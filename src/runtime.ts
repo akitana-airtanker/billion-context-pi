@@ -43,6 +43,10 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   function liveContextLimit(ctx: ExtensionContext): number {
+    // Prefer pi's reported context window (matches what the footer shows) over
+    // ctx.model.contextWindow, which can be stale or unset for some providers.
+    const usage = ctx.getContextUsage?.();
+    if (usage?.contextWindow && usage.contextWindow > 0) return usage.contextWindow;
     const m = ctx.model as { contextWindow?: number } | undefined;
     return m?.contextWindow ?? 0;
   }
@@ -63,5 +67,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, adapter: adapterRef, setAdapter: (a) => { adapterRef = a; }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, liveContextLimit, configFor, stateFor, save, acquireLock };
 }
