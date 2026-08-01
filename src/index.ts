@@ -121,36 +121,35 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    const terminalNudge = runtime.adapter.terminalNudge ?? true;
+    const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
-      // Emergency nudges (usage >= 80%) print every time — they are overflow
-      // warnings the user must always see. Other nudges (tier distillation,
-      // growth) print at most once per turn: pi fires the context event
-      // multiple times per assistant reply (streaming/tool loop), and without
-      // this gate a tier-2 nudge would spam the terminal on every event.
+      // Two independent channels for the nudge:
+      //  1. CONTEXT injection (always on): the nudge is appended to the
+      //     messages returned to the LLM so the model sees it and compresses.
+      //     This is a per-turn append — the next context event rebuilds the
+      //     array from scratch, so it does NOT permanently pollute context.
+      //  2. TERMINAL echo (debug only): when debug is on, also print the exact
+      //     text via ctx.ui.notify so the user can observe what is being
+      //     injected while debugging. The model never sees terminal output.
+      // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
+      // overflow warning always reaches the model. Other nudges inject at most
+      // once per turn: pi fires the context event multiple times per assistant
+      // reply (streaming/tool loop), and without this gate the same nudge
+      // would be appended on every event.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       const turnKey = lastUserMessageId(entries) ?? sid;
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
       if (!alreadyShown) {
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
         const rendered = renderNudgeText(turn.nudge);
-        const lines = [rendered.text];
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
-        if (top) {
-          lines.push("", `Example: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })`);
-        }
-        const text = lines.join("\n");
-        if (terminalNudge) {
-          // Print to the user terminal only — the model never sees this. Mirrors
-          // opencode-acp's ignored-part injection: surface the nudge without
-          // spending model context on it.
-          if (ctx.hasUI) ctx.ui.notify(text);
-        } else {
-          // Legacy: inject as a context message the model can act on.
-          rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
+        const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
+        if (debugOn && ctx.hasUI) {
+          ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
         if (!emergency) runtime.markNudgeShown(turnKey);
-        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channel: terminalNudge ? "terminal" : "context", emergency, turnKey, text });
+        debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
         debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
       }
@@ -158,7 +157,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     // Always return the transformed array: every message needs its [mNNNNN] ref
     // tag applied, so there is no meaningful "no change" case to short-circuit.
-    debug.event("context-out", { outMsgs: rebuilt.length, injected: turn.nudge?.shouldInject ?? false, channel: turn.nudge?.shouldInject ? (terminalNudge ? "terminal" : "context") : "none" });
+    debug.event("context-out", { outMsgs: rebuilt.length, injected: turn.nudge?.shouldInject ?? false, emergency: turn.nudge?.breakdown?.emergencyOverride === 1 });
     return { messages: rebuilt };
     } finally {
       release();
