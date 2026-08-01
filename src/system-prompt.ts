@@ -3,7 +3,7 @@ ACP context management
 
 ACP TAGS
 
-Each user and tool message has an <acp tokens="2.1K" type="bash">m00175</acp> tag showing its ref (mNNNNN), approximate token size, and content type. Assistant messages are untagged — infer their refs from adjacent tagged messages. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g., m00005) inside compress calls — never the XML wrapper.
+Each user and tool message has an \x3cacp tokens="2.1K" type="bash"\x3em00175\x3c/acp\x3e tag showing its ref (mNNNNN), approximate token size, and content type. Assistant messages are untagged — infer their refs from adjacent tagged messages. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g., m00005) inside compress calls — never the XML wrapper.
 
 COMPRESSION SUMMARIES IN CONTEXT
 
