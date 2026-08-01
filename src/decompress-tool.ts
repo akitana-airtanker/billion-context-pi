@@ -3,10 +3,14 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { debug } from "./log.js";
 import { parseBlockIdArg, deactivateBlock, buildRestoredContentPreview } from "acp-kernel";
+import { writeFile } from "node:fs/promises";
+import { resolve, relative, isAbsolute, join } from "node:path";
+import { tmpdir } from "node:os";
 
 const DecompressParams = Type.Object({
   blockId: Type.String({ description: 'Block id to restore, e.g. "b5".' }),
   full: Type.Optional(Type.Boolean({ description: "If true, also deactivate all nested (consumed) blocks — restores all the way to original messages. Default: false (restores one tier up)." })),
+  toFile: Type.Optional(Type.String({ description: "If provided, write the restored content to this file path (must be under /tmp or ~/.cache/opencode) instead of inflating context." })),
 });
 
 type DecompressArgs = Static<typeof DecompressParams>;
@@ -31,6 +35,34 @@ export function makeDecompressTool(runtime: AcpRuntime): ToolDefinition<typeof D
   };
 }
 
+function resolveToFilePath(targetPath: string): string | { error: string } {
+  // Expand a leading ~ to the home dir so users can pass ~/.cache/...
+  const expanded = targetPath.startsWith("~/")
+    ? join(process.env.HOME ?? "", targetPath.slice(2))
+    : targetPath;
+  const resolved = resolve(expanded);
+  const allowedDirs = [
+    tmpdir(),
+    join(process.env.HOME ?? "", ".cache", "opencode"),
+  ];
+  const isAllowed = allowedDirs.some((dir) => {
+    const rel = relative(dir, resolved);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  });
+  if (!isAllowed) {
+    return { error: `Error: toFile path must be under ${tmpdir()} or ~/.cache/opencode/. Got: ${targetPath}` };
+  }
+  return resolved;
+}
+
+function collectBlockText(coreMessages: { id?: string; text?: string }[], msgIds: Set<string>): string {
+  const lines: string[] = [];
+  for (const m of coreMessages) {
+    if (m.id && msgIds.has(m.id) && m.text) lines.push(m.text);
+  }
+  return lines.length > 0 ? lines.join("\n\n---\n\n") : "(no content available)";
+}
+
 async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
   const blockId = parseBlockIdArg(args.blockId);
   if (!blockId) return `Invalid blockId: ${args.blockId}. Expected format like "b5" or "5".`;
@@ -44,6 +76,20 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
   if (!block.active) return `Block ${blockId} is already inactive.`;
 
   const beforeActiveIds = new Set(block.effectiveMessageIds);
+
+  // toFile: write restored content to a file instead of deactivating the
+  // block (which would inflate context). Collects the same messages that
+  // would become visible, writes them to the requested path, and leaves
+  // context untouched.
+  if (args.toFile) {
+    const resolved = resolveToFilePath(args.toFile);
+    if (typeof resolved !== "string") return resolved.error;
+    const content = collectBlockText(coreMessages, beforeActiveIds);
+    await writeFile(resolved, content, "utf8");
+    debug.event("decompress-to-file", { blockId, path: resolved, bytes: content.length });
+    return `Wrote block ${blockId} content (${content.length} bytes) to ${resolved}. Context not inflated.`;
+  }
+
   const newState = deactivateBlock(state, [blockId], { deep: args.full ?? false });
   await runtime.save(newState, ctx);
 
