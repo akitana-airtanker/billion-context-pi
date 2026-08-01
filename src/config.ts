@@ -16,15 +16,15 @@ export interface AdapterConfig {
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
-  const DEFAULT_TARGET = 150_000;
+  const FALLBACK_LIMIT = 150_000;
   const limit =
     !Number.isNaN(envLimitNum) && envLimitNum > 0
       ? envLimitNum
       : adapter.modelContextLimit && adapter.modelContextLimit > 0
         ? adapter.modelContextLimit
         : liveContextLimit > 0
-          ? Math.min(liveContextLimit, DEFAULT_TARGET)
-          : DEFAULT_TARGET;
+          ? liveContextLimit
+          : FALLBACK_LIMIT;
   return defaultConfig(limit, {
     protectedTools: adapter.protectedTools ?? [],
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
