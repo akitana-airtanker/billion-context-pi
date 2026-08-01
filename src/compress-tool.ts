@@ -41,14 +41,14 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       "Never compress content the current step is actively using.",
     ],
     parameters: CompressParams,
-    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-      const result = await handleCompress(params as CompressArgs, runtime, ctx);
+    async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      const result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
       return { details: undefined, content: [{ type: "text", text: result }] };
     },
   };
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
+async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
   const { state, coreMessages } = await runtime.stateFor(ctx);
@@ -69,7 +69,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
 
   const applied = runtime.core.applyCompression({
-    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars })),
+    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages: coreMessages,
     state,
     config,
