@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { defaultCountTokens, deactivateBlock, parseBlockIdArg, buildRestoredContentPreview } from "acp-kernel";
+import { defaultCountTokens, deactivateBlock, parseBlockIdArg, buildRestoredContentPreview, formatRanges } from "acp-kernel";
 
 declare const CURRENT_VERSION: string;
 
@@ -164,13 +164,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   }
 
   const ranges = nudge?.compressibleRanges ?? [];
-  if (ranges.length > 0) {
+  const protectedRanges = nudge?.protectedRanges ?? [];
+  if (ranges.length > 0 || protectedRanges.length > 0) {
     lines.push("");
-    lines.push(`Compressible Ranges (${ranges.length}):`);
-    for (const r of ranges) {
-      const tools = r.toolPct > 0 ? ` (${Math.round(r.toolPct)}% tools)` : "";
-      lines.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
-    }
+    lines.push(formatRanges(ranges, protectedRanges));
   }
 
   if (activeBlocksList.length > 0) {
