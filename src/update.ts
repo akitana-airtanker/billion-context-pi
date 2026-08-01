@@ -1,12 +1,14 @@
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFile } from "node:child_process";
 import { debug } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
 const PACKAGE_NAME = "pai-acp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
@@ -26,8 +28,7 @@ function isNewer(latest: string, current: string): boolean {
 
 async function readLastCheck(): Promise<number> {
   try {
-    const fs = await import("node:fs/promises");
-    const data = await fs.readFile(THROTTLE_FILE, "utf-8");
+    const data = await readFile(THROTTLE_FILE, "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
@@ -36,11 +37,8 @@ async function readLastCheck(): Promise<number> {
 
 async function writeLastCheck(timestamp: number): Promise<void> {
   try {
-    const fs = await import("node:fs/promises");
-    const path = await import("node:path");
-    const dir = path.dirname(THROTTLE_FILE);
-    await fs.mkdir(dir, { recursive: true });
-    await fs.writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
+    await mkdir(dirname(THROTTLE_FILE), { recursive: true });
+    await writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
   } catch {
     // best-effort
   }
@@ -82,32 +80,44 @@ async function findExtensionDir(): Promise<string | undefined> {
 }
 
 async function autoInstallLatest(latest: string): Promise<boolean> {
+  // Defense against a poisoned/MITM registry: only accept a strict semver,
+  // then pass args as an array to execFile (never via a shell string) so the
+  // version can never be interpreted as a command even if it slipped through.
+  if (!SEMVER_RE.test(latest)) return false;
   const extDir = await findExtensionDir();
   if (!extDir) return false;
   const npmDir = findNpmRoot(extDir);
   if (!npmDir) return false;
 
   try {
-    const npmPkgPath = join(npmDir, "package.json");
-    const npmPkg = await readPackageJson(npmPkgPath);
-    if (npmPkg?.dependencies?.[PACKAGE_NAME]) {
-      npmPkg.dependencies[PACKAGE_NAME] = latest;
-      await writeFile(npmPkgPath, JSON.stringify(npmPkg, null, 2) + "\n");
-    }
-
-    const { exec } = await import("node:child_process");
-    await new Promise<void>((resolve) => {
-      exec("npm install --silent --no-audit --no-fund", { cwd: npmDir, timeout: 30_000 }, () => resolve());
+    const code = await new Promise<number>((resolve) => {
+      execFile(
+        "npm",
+        ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
+        { cwd: npmDir, timeout: 60_000 },
+        (err) => resolve(err ? 1 : 0),
+      );
     });
-    return true;
+    return code === 0;
   } catch {
     return false;
   }
 }
 
 export async function checkForUpdate(
+  autoUpdate: boolean,
   notify?: (msg: string) => void,
 ): Promise<void> {
+  const envFlag = process.env.ACP_AUTO_UPDATE?.toLowerCase();
+  if (
+    !autoUpdate ||
+    envFlag === "0" ||
+    envFlag === "false" ||
+    envFlag === "no" ||
+    envFlag === "off"
+  ) {
+    return;
+  }
   const now = Date.now();
   const lastCheck = await readLastCheck();
   if (now - lastCheck < CHECK_INTERVAL_MS) return;

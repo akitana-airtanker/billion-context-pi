@@ -74,7 +74,7 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
 
 ### Auto-update
 
-On each Pi startup, pai-acp checks npm for a newer version and auto-installs it. No manual updates needed — just restart Pi.
+On each Pi startup, pai-acp checks npm for a newer version and auto-installs it. No manual updates needed — just restart Pi. To disable (no network calls on startup), set `autoUpdate: false` in the config, or set the env var `ACP_AUTO_UPDATE` to one of: `0`, `false`, `no`, or `off` (case-insensitive).
 
 ### Compression philosophy in system prompt
 

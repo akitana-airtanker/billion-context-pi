@@ -1,6 +1,6 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { defaultCountTokens } from "acp-kernel";
+import { defaultCountTokens, deactivateBlock, parseBlockIdArg, buildRestoredContentPreview } from "acp-kernel";
 
 declare const CURRENT_VERSION: string;
 
@@ -25,16 +25,28 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp-decompress",
       options: {
-        description: "Restore a compressed block's summary. Usage: /acp-decompress b3",
+        description: "Restore a compressed block (deactivate it). Usage: /acp-decompress b3",
         handler: async (args, ctx) => {
-          const id = args.trim();
-          if (!id) {
-            ctx.ui.notify("Usage: /acp-decompress <blockId>");
+          const blockId = parseBlockIdArg(args);
+          if (!blockId) {
+            ctx.ui.notify('Usage: /acp-decompress <blockId> (e.g. "b3")');
             return;
           }
-          const { state } = await runtime.stateFor(ctx);
-          const block = runtime.core.decompress(id, state);
-          ctx.ui.notify(block ? `[${id}] ${block.summary}` : `Block ${id} not found.`);
+          const { state, coreMessages } = await runtime.stateFor(ctx);
+          const block = state.blocks.find((b) => b.blockId === blockId);
+          if (!block) {
+            ctx.ui.notify(`Block ${blockId} not found.`);
+            return;
+          }
+          if (!block.active) {
+            ctx.ui.notify(`Block ${blockId} is already inactive.`);
+            return;
+          }
+          const beforeIds = new Set(block.effectiveMessageIds);
+          const newState = deactivateBlock(state, [blockId], { deep: false });
+          await runtime.save(newState, ctx);
+          const { restoredCount } = buildRestoredContentPreview(coreMessages, beforeIds, newState);
+          ctx.ui.notify(`Restored block ${blockId}: ${restoredCount} message(s) now visible.`);
         },
       },
     },
