@@ -149,7 +149,7 @@ function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[]): AgentMe
       tierCounts[t] = (tierCounts[t] || 0) + 1;
     }
     const tierStr = Object.keys(tierCounts).map(Number).sort().map((t) => `T${t}:${tierCounts[t]}`).join(" ");
-    const ids = blocks.slice(0, 10).map((b) => `b${b.blockId}`).join(", ");
+    const ids = blocks.slice(0, 10).map((b) => b.blockId).join(", ");
     const extra = blocks.length > 10 ? ` (+${blocks.length - 10} more)` : "";
     lines.push("");
     lines.push(`Compressed blocks: ${blocks.length} active (${tierStr}) — ${fmt(totalSummary)} summary, ${fmt(totalCompressed)} original compressed. Blocks: ${ids}${extra}.`);
