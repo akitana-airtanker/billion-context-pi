@@ -27,31 +27,26 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
       options: {
         description: "Restore a compressed block (deactivate it). Usage: /acp-decompress b3",
         handler: async (args, ctx) => {
-          const id = args.trim();
-          if (!id) {
-            ctx.ui.notify("Usage: /acp-decompress <blockId>");
-            return;
-          }
-          const blockIdNum = parseBlockIdArg(id);
-          if (blockIdNum === null) {
-            ctx.ui.notify(`Invalid blockId: ${id}. Use format like "b3".`);
+          const blockId = parseBlockIdArg(args);
+          if (!blockId) {
+            ctx.ui.notify('Usage: /acp-decompress <blockId> (e.g. "b3")');
             return;
           }
           const { state, coreMessages } = await runtime.stateFor(ctx);
-          const block = state.blocks.find((b) => b.blockId === blockIdNum);
+          const block = state.blocks.find((b) => b.blockId === blockId);
           if (!block) {
-            ctx.ui.notify(`Block ${id} not found.`);
+            ctx.ui.notify(`Block ${blockId} not found.`);
             return;
           }
           if (!block.active) {
-            ctx.ui.notify(`Block ${id} is already inactive.`);
+            ctx.ui.notify(`Block ${blockId} is already inactive.`);
             return;
           }
           const beforeIds = new Set(block.effectiveMessageIds);
-          const newState = deactivateBlock(state, [blockIdNum], { deep: false });
+          const newState = deactivateBlock(state, [blockId], { deep: false });
           await runtime.save(newState, ctx);
           const { restoredCount } = buildRestoredContentPreview(coreMessages, beforeIds, newState);
-          ctx.ui.notify(`Restored block ${id}: ${restoredCount} message(s) now visible.`);
+          ctx.ui.notify(`Restored block ${blockId}: ${restoredCount} message(s) now visible.`);
         },
       },
     },

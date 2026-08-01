@@ -1,13 +1,14 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { exec } from "node:child_process";
+import { execFile } from "node:child_process";
 import { debug } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
 const PACKAGE_NAME = "pai-acp";
 const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
@@ -79,6 +80,10 @@ async function findExtensionDir(): Promise<string | undefined> {
 }
 
 async function autoInstallLatest(latest: string): Promise<boolean> {
+  // Defense against a poisoned/MITM registry: only accept a strict semver,
+  // then pass args as an array to execFile (never via a shell string) so the
+  // version can never be interpreted as a command even if it slipped through.
+  if (!SEMVER_RE.test(latest)) return false;
   const extDir = await findExtensionDir();
   if (!extDir) return false;
   const npmDir = findNpmRoot(extDir);
@@ -86,14 +91,11 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
 
   try {
     const code = await new Promise<number>((resolve) => {
-      exec(
-        `npm install ${PACKAGE_NAME}@${latest} --silent --no-audit --no-fund`,
+      execFile(
+        "npm",
+        ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
         { cwd: npmDir, timeout: 60_000 },
-        (err) => {
-          if (!err) return resolve(0);
-          const exit = (err as NodeJS.ErrnoException & { code?: number }).code;
-          resolve(typeof exit === "number" ? exit : 1);
-        },
+        (err) => resolve(err ? 1 : 0),
       );
     });
     return code === 0;
@@ -106,10 +108,13 @@ export async function checkForUpdate(
   autoUpdate: boolean,
   notify?: (msg: string) => void,
 ): Promise<void> {
+  const envFlag = process.env.ACP_AUTO_UPDATE?.toLowerCase();
   if (
     !autoUpdate ||
-    process.env.ACP_AUTO_UPDATE === "0" ||
-    process.env.ACP_AUTO_UPDATE === "false"
+    envFlag === "0" ||
+    envFlag === "false" ||
+    envFlag === "no" ||
+    envFlag === "off"
   ) {
     return;
   }
