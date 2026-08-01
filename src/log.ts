@@ -1,13 +1,24 @@
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
 
-const DEBUG = process.env.ACP_DEBUG === "1" || process.env.ACP_DEBUG === "true";
+const ENV_DEBUG = process.env.ACP_DEBUG === "1" || process.env.ACP_DEBUG === "true";
 const LOG_FILE = process.env.ACP_LOG_FILE ?? path.join(process.env.HOME ?? "/tmp", ".pi", "acp-debug.log");
 
+let runtimeDebug: boolean | null = null;
 let initialized = false;
 
+/** Toggle debug at runtime from config (config.debug takes precedence over the
+ *  env var when set). Called once during session_start. */
+export function setDebugEnabled(enabled: boolean): void {
+  runtimeDebug = enabled;
+}
+
+function debugOn(): boolean {
+  return runtimeDebug ?? ENV_DEBUG;
+}
+
 async function write(line: string): Promise<void> {
-  if (!DEBUG) return;
+  if (!debugOn()) return;
   if (!initialized) {
     initialized = true;
     await fs.mkdir(path.dirname(LOG_FILE), { recursive: true }).catch(() => {});
@@ -17,13 +28,13 @@ async function write(line: string): Promise<void> {
 
 export const debug = {
   get enabled(): boolean {
-    return DEBUG;
+    return debugOn();
   },
   get logFile(): string {
     return LOG_FILE;
   },
   event(scope: string, fields: Record<string, unknown>): void {
-    if (!DEBUG) return;
+    if (!debugOn()) return;
     const ts = new Date().toISOString();
     const body = Object.entries(fields)
       .map(([k, v]) => `${k}=${fmt(v)}`)

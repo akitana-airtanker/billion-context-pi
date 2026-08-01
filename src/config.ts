@@ -14,6 +14,13 @@ export interface AdapterConfig {
    *  Disable via `autoUpdate: false` or env `ACP_AUTO_UPDATE=0` to avoid all
    *  network calls on startup. */
   autoUpdate?: boolean;
+  /** Write ACP debug events to the debug log file (default ~/.pi/acp-debug.log).
+   *  Default: false (or env ACP_DEBUG=1/true). */
+  debug?: boolean;
+  /** Print nudge/compression notices to the user terminal via ctx.ui.notify
+   *  instead of injecting them into the model's context. Default: true.
+   *  When false, nudges are injected as a context message the model can see. */
+  terminalNudge?: boolean;
   coreOverrides?: Partial<Config>;
 }
 

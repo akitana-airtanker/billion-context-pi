@@ -15,9 +15,10 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
-import { debug } from "./log.js";
+import { debug, setDebugEnabled } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
+import { loadUserConfig, applyUserConfig } from "./user-config.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -47,8 +48,18 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 }
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
+    // Load user config (~/.pi/acp.json + project .pi/acp.json) and apply it so
+    // debug/terminalNudge/autoUpdate/modelContextLimit are runtime-configurable
+    // without env vars or reinstalling.
+    try {
+      const user = await loadUserConfig(ctx.cwd);
+      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
+      if (runtime.adapter.debug === true) setDebugEnabled(true);
+    } catch {
+      // best-effort — fall back to factory/env config
+    }
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
@@ -100,11 +111,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
     const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    const out = turn.nudge?.shouldInject ? [...rebuilt, nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active))] : rebuilt;
+    const terminalNudge = runtime.adapter.terminalNudge ?? true;
 
-    // Always return the transformed array: every message needs its [mNNNNN] ref
-    // tag applied, so there is no meaningful "no change" case to short-circuit.
-      debug.event("context-out", { outMsgs: out.length, injected: turn.nudge?.shouldInject ?? false });
     if (turn.nudge?.shouldInject) {
       const rendered = renderNudgeText(turn.nudge);
       const lines = [rendered.text];
@@ -112,9 +120,23 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (top) {
         lines.push("", `Example: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })`);
       }
-      debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, text: lines.join("\n") });
+      const text = lines.join("\n");
+      if (terminalNudge) {
+        // Print to the user terminal only — the model never sees this. Mirrors
+        // opencode-acp's ignored-part injection: surface the nudge without
+        // spending model context on it.
+        if (ctx.hasUI) ctx.ui.notify(text);
+      } else {
+        // Legacy: inject as a context message the model can act on.
+        rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active)));
+      }
+      debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channel: terminalNudge ? "terminal" : "context", text });
     }
-    return { messages: out };
+
+    // Always return the transformed array: every message needs its [mNNNNN] ref
+    // tag applied, so there is no meaningful "no change" case to short-circuit.
+    debug.event("context-out", { outMsgs: rebuilt.length, injected: turn.nudge?.shouldInject ?? false, channel: turn.nudge?.shouldInject ? (terminalNudge ? "terminal" : "context") : "none" });
+    return { messages: rebuilt };
     } finally {
       release();
     }
