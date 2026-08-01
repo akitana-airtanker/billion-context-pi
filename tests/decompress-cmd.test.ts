@@ -56,18 +56,26 @@ test("/acp-decompress deactivates an active block and reports restored count", a
   await cleanState(stateFile);
   // acp-kernel refuses to compress ranges under 5000 chars; pad the target message.
   const longText = "This is a detailed message that needs to be compressed. ".repeat(130);
-  const entries = [userMsg("e1", longText), userMsg("e2", "second message"), userMsg("e3", "third message")];
+  // Each filler is ~2000 chars so Rule 2 (preserveRecentTokens=5000) stops well
+  // before m00001, and with 6 fillers m00001 is outside last-5 (Rule 1).
+  const filler = (n: string) => `filler ${n} `.repeat(400);
+  const entries = [
+    userMsg("e1", longText),
+    userMsg("e2", filler("two")), userMsg("e3", filler("three")),
+    userMsg("e4", filler("four")), userMsg("e5", filler("five")),
+    userMsg("e6", filler("six")), userMsg("e7", filler("seven")),
+  ];
   const notifies: string[] = [];
   const ctx = fakeCtx(entries, stateFile, notifies);
 
   // 1) Run the context handler so the kernel assigns refs (m00001..) and saves state.
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
 
-  // 2) Compress the first message range to create an active block (b1).
+  // 2) Compress the target message (m00001) to create an active block (b1).
   const compressTool = api.tools.find((t: any) => t.name === "compress")!;
   const compressRes = await compressTool.execute(
     "tc1",
-    { content: [{ startId: "m00001", endId: "m00001", summary: "This range contained the first user message which discussed the initial detailed context for the session." }] },
+    { content: [{ startId: "m00001", endId: "m00001", summary: "This range contained a detailed user message discussing the initial context for the session." }] },
     undefined,
     undefined,
     ctx,
