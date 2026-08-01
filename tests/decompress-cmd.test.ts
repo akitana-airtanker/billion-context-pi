@@ -47,8 +47,9 @@ function fakeCtx(entries: any[], stateFile: string, notifies: string[]) {
 }
 
 // Full pipeline: context handler assigns refs → compress tool creates an active
-// block → /acp-decompress deactivates it and persists state.
-test("/acp-decompress deactivates an active block and reports restored count", async () => {
+// block → /acp-decompress returns the block's content without deactivating it
+// (append semantics: the block stays folded, content shown via notify).
+test("/acp-decompress returns a block's content and stays repeatable (append mode)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
 
@@ -83,17 +84,17 @@ test("/acp-decompress deactivates an active block and reports restored count", a
   const compressText = (compressRes.content[0] as any).text as string;
   assert.match(compressText, /1 block/, "compress created a block");
 
-  // 3) Run /acp-decompress b1.
+  // 3) Run /acp-decompress b1 — returns content, does NOT deactivate.
   notifies.length = 0;
   const decompressCmd = api.commands.get("acp-decompress");
   await decompressCmd.handler("b1", ctx);
   assert.equal(notifies.length, 1);
-  assert.match(notifies[0]!, /Restored block b1: \d+ message/, "notify reports restored count");
+  assert.match(notifies[0]!, /Block b1 \(\d+ item/, "notify reports restored count");
 
-  // 4) Re-running on the same id now reports it is already inactive.
+  // 4) Re-running on the same id is idempotent (block stays active, content shown again).
   notifies.length = 0;
   await decompressCmd.handler("b1", ctx);
-  assert.match(notifies[0]!, /already inactive/i, "second call sees inactive block");
+  assert.match(notifies[0]!, /Block b1 \(\d+ item/, "repeat call returns content again");
 });
 
 test("/acp-decompress rejects invalid input with a usage message", async () => {
