@@ -9,7 +9,6 @@ import { debug } from "./log.js";
  *  (project-local overrides project-global). Project wins over global. */
 export interface UserAcpConfig {
   debug?: boolean;
-  terminalNudge?: boolean;
   autoUpdate?: boolean;
   modelContextLimit?: number;
 }
@@ -39,7 +38,7 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set(["debug", "terminalNudge", "autoUpdate", "modelContextLimit"]);
+const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit"]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};
