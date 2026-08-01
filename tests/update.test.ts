@@ -20,8 +20,16 @@ test("checkForUpdate is a no-op when autoUpdate=false (no fetch)", async () => {
 });
 
 test("checkForUpdate is a no-op for every opt-out env value, case-insensitive (no fetch)", async () => {
-  const opts = ["0", "false", "no", "off", "FALSE", "No", "Off", "FALSE", "0"];
+  const opts = ["0", "false", "no", "off", "FALSE", "No", "Off"];
   for (const v of opts) {
+    process.env.ACP_AUTO_UPDATE = v;
+    await withFetchGuard(() => checkForUpdate(true));
+  }
+  delete process.env.ACP_AUTO_UPDATE;
+});
+
+test("checkForUpdate trims surrounding whitespace in ACP_AUTO_UPDATE before matching (no fetch)", async () => {
+  for (const v of [" false ", "\t no\t", "  off "]) {
     process.env.ACP_AUTO_UPDATE = v;
     await withFetchGuard(() => checkForUpdate(true));
   }

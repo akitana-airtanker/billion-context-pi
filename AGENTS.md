@@ -45,7 +45,7 @@ pi-acp/
 │   ├── update.ts             # Auto-update: checks npm, auto-installs latest
 │   ├── tokens.ts             # Token estimation utilities
 │   └── log.ts                # Debug logging
-├── tests/                    # 16 tests
+├── tests/                    # 32 tests
 ├── tsup.config.ts
 └── package.json
 ```

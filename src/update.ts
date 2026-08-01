@@ -108,7 +108,7 @@ export async function checkForUpdate(
   autoUpdate: boolean,
   notify?: (msg: string) => void,
 ): Promise<void> {
-  const envFlag = process.env.ACP_AUTO_UPDATE?.toLowerCase();
+  const envFlag = process.env.ACP_AUTO_UPDATE?.trim().toLowerCase();
   if (
     !autoUpdate ||
     envFlag === "0" ||
