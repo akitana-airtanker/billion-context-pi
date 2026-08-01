@@ -18,7 +18,7 @@ TOOLS
 You have four context-management tools:
 
 - compress — Replace a contiguous range of older conversation with a single detailed summary you write. Use when content is genuinely consumed (no longer needed for the current task step). Single range: compress({ content: [{ startId: "m00150", endId: "m00220", summary: "..." }] }). Batch (multiple unrelated ranges, each with its own topic): compress({ content: [{ topic: "Auth", startId: "m00150", endId: "m00220", summary: "..." }, { topic: "Deploy", startId: "m00300", endId: "m00350", summary: "..." }] }).
-- decompress — Restore a previously compressed block's content. Content is returned as the tool result (appended to the conversation); the block stays compressed, so context and cache prefix are not disrupted. By default restores one tier up (T2 shows T1 summaries). Use full: true to recurse all the way to original messages. Use toFile to write restored content to a file (under /tmp or ~/.cache/opencode) instead of returning it inline. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", full: true }) or decompress({ blockId: "b5", toFile: "/tmp/b5.txt" }).
+- decompress — Restore a previously compressed block's content. The block stays compressed — context and cache prefix are not disrupted. By DEFAULT content is written to an auto-generated file (avoids context bloat); use the read tool to view it. Pass inline:true to return content in the tool result instead (appends to context). full:true recurses to original messages. Example: decompress({ blockId: "b5" }) or decompress({ blockId: "b5", full: true }) or decompress({ blockId: "b5", inline: true }).
 - search_context — Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
 - acp_status — Context status with compressible ranges. No args = overview + totals. scope:"uncompressed" for range view; add view:"messages" for per-message listing. scope:"compressed" for block details.
 
@@ -83,7 +83,7 @@ To compress blocks: use block IDs as boundaries: compress({ content: [{ startId:
 
 THE PHILOSOPHY OF DECOMPRESS
 
-decompress restores previously compressed content as a tool result appended to the conversation. The compressed block stays folded (its summary remains in place), so the cache prefix is preserved and context is minimally disrupted — only the tool result adds to it. Use decompress when you need exact details lost in compression. Before decompressing, use search_context to find the right block.
+decompress restores previously compressed content and writes it to a file by default (use inline:true to return it in the tool result instead). The compressed block stays folded (its summary remains in place), so the cache prefix is preserved and context is minimally disrupted. Use decompress when you need exact details lost in compression. Before decompressing, use search_context to find the right block.
 
 CONTEXT BREAKDOWN
 
