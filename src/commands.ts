@@ -153,12 +153,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   if (ranges.length > 0) {
     lines.push("");
     lines.push(`Compressible Ranges (${ranges.length}):`);
-    for (const r of ranges.slice(0, 8)) {
+    for (const r of ranges) {
       const tools = r.toolPct > 0 ? ` (${Math.round(r.toolPct)}% tools)` : "";
       lines.push(`  ${r.startRef}\u2013${r.endRef}  (${r.count} msgs, ${fmtTokens(r.tokens)}${tools})`);
-    }
-    if (ranges.length > 8) {
-      lines.push(`  ...and ${ranges.length - 8} more`);
     }
   }
 
@@ -167,7 +164,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
     for (const b of activeBlocksList) {
       const topic = b.topic ? `: ${b.topic}` : "";
-      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(Math.ceil((b.summary || "").length / 4))}tok${topic}`);
+      const summaryTok = defaultCountTokens(b.summary || "");
+      const origTok = b.compressedTokens > 0 ? b.compressedTokens : summaryTok;
+      lines.push(`  [${b.blockId}] T${b.tier} ${fmtTokens(origTok)}\u2192${fmtTokens(summaryTok)}${topic}`);
     }
   } else if (totalBlocksList.length > 0) {
     lines.push("");
