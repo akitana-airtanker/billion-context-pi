@@ -484,7 +484,7 @@ function formatPayload(header: string, runId: string, file: string, body: string
     lines.push("(result could not be persisted to a file)");
   }
   lines.push("");
-  lines.push("Preview (first lines):", "```", truncate(body, RESULT_SUMMARY_CHARS), "```", "");
+  lines.push("Preview (first lines):", "~~~", truncate(body, RESULT_SUMMARY_CHARS), "~~~", "");
   void runId;
   return lines.join("\n");
 }
