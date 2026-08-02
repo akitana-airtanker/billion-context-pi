@@ -12,6 +12,7 @@ import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
+import { makeDelegateTool, makeDelegateStatusTool, makeDelegateCancelTool, pendingDelegateRuns } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -34,6 +35,16 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
+    // acp_delegate is independent of the ACP runtime (it only uses pi APIs),
+    // so it receives `pi` directly rather than the AcpRuntime. Kept in pai-acp
+    // for single-plugin simplicity; isolated in its own module for cleanliness.
+    pi.registerTool(makeDelegateTool(pi));
+    pi.registerTool(makeDelegateStatusTool(pi));
+    pi.registerTool(makeDelegateCancelTool(pi));
+    // Drain background delegates before pi shuts down: in long-running modes
+    // (interactive/rpc) this lets async delegates finish and inject their
+    // results into the chat instead of being cut off at exit.
+    wireDelegateDrain(pi);
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
     }
@@ -46,6 +57,20 @@ export default createAcpExtension();
 // opencode-acp requiring opencode's compaction.auto = false).
 function wireCompactionDisable(pi: ExtensionAPI): void {
   pi.on("session_before_compact", () => ({ cancel: true }));
+}
+
+// Wait for background acp_delegate runs to finish (and inject their results)
+// before pi exits. In interactive/rpc modes this lets async delegates deliver
+// instead of being killed at shutdown. ExtensionHandler return values are
+// awaited by pi's event emitter (runner.js emit() does `await handler(...)`).
+function wireDelegateDrain(pi: ExtensionAPI): void {
+  pi.on("session_shutdown", async () => {
+    const pending = pendingDelegateRuns();
+    if (pending.length > 0) {
+      debug.event("delegate-drain", { count: pending.length });
+      await Promise.all(pending);
+    }
+  });
 }
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {

@@ -1,0 +1,471 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Type, type Static } from "typebox";
+import type {
+  AgentToolResult,
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import { debug } from "./log.js";
+
+// `sendUserMessage` exists on the ExtensionAPI at runtime (dynamically attached
+// by pi's extension runner / loader) even though the published type declaration
+// omits it. We narrow-cast to call it without resorting to `as any`.
+type MessagingApi = {
+  sendUserMessage?: (
+    content: string,
+    options?: { deliverAs?: "steer" | "followUp" },
+  ) => Promise<void> | void;
+};
+
+const MAX_DEPTH = 2;
+const SYNC_TIMEOUT_MS = 5 * 60_000;
+
+interface AgentDef {
+  prompt: string;
+  tools: string;
+}
+
+// Minimal roster. The tool description lists these so the model knows how to
+// pick one — no separate prompt injection needed (keeps fixed cost tiny).
+const AGENTS: Record<string, AgentDef> = {
+  reviewer: {
+    tools: "read,bash",
+    prompt: `You are a senior code reviewer with read-only access.
+Read the given code and report: bugs, security/safety risks, correctness issues, and concrete improvement suggestions.
+Be specific — cite file:line for every finding. Do NOT modify any files; only read and report.`,
+  },
+  researcher: {
+    tools: "read,bash",
+    prompt: `You are a code researcher with read-only access.
+Investigate the codebase to answer the question thoroughly. Report findings with exact file:line references, function/type signatures, and relevant code snippets.
+Do NOT modify any files; only read and report.`,
+  },
+  worker: {
+    tools: "read,edit,write,bash",
+    prompt: `You are a precise implementer.
+Make exactly the requested code changes — minimal, focused, following existing project conventions (check AGENTS.md first if present).
+After editing, briefly summarize what you changed and why. Do not expand scope.`,
+  },
+  planner: {
+    tools: "read,bash",
+    prompt: `You are a technical planner with read-only access.
+Analyze the task and produce a concrete, ordered step-by-step implementation plan with rationale for each step.
+Cite file:line for code you reference. Do NOT modify any files; only read and propose.`,
+  },
+  oracle: {
+    tools: "read,bash",
+    prompt: `You are an expert advisor with read-only access.
+Answer the question concisely with clear reasoning. Cite file:line when referencing code. Do NOT modify any files.`,
+  },
+};
+
+const AGENT_NAMES = Object.keys(AGENTS);
+
+// ─── Run registry (module-level, shared across tools) ───────────────────────
+
+type RunStatus = "running" | "completed" | "failed" | "cancelled";
+
+interface DelegateRun {
+  runId: string;
+  agent: string;
+  task: string;
+  cwd: string;
+  startedAt: number;
+  finishedAt?: number;
+  status: RunStatus;
+  exitCode?: number | null;
+  child?: ChildProcess;
+  // Resolves when the child has fully exited AND its result (if async) has been
+  // injected into the parent chat. Used by the drain hook so pi waits for
+  // background delegates before shutting down.
+  done: Promise<void>;
+}
+
+const runs = new Map<string, DelegateRun>();
+
+/** Resolve all currently-running background delegates' done promises. */
+export function pendingDelegateRuns(): Promise<unknown>[] {
+  const pending: Promise<unknown>[] = [];
+  for (const r of runs.values()) {
+    if (r.status === "running") pending.push(r.done.catch(() => {}));
+  }
+  return pending;
+}
+
+const DelegateParams = Type.Object({
+  agent: Type.String({
+    description: `Role of the delegate. One of: ${AGENT_NAMES.join(", ")}. See tool description for what each does.`,
+  }),
+  task: Type.String({
+    description: "The self-contained task to hand off. State purpose, scope, and any constraints explicitly.",
+  }),
+  cwd: Type.Optional(
+    Type.String({ description: "Working directory for the delegate (default: current project dir)." }),
+  ),
+  model: Type.Optional(
+    Type.String({ description: 'Model override as "provider/id" (default: inherit current model).' }),
+  ),
+  async: Type.Optional(
+    Type.Boolean({
+      description: "If true (default), return immediately with a runId; the result is injected into chat when the delegate finishes. If false, block until the delegate finishes and return its output here.",
+    }),
+  ),
+});
+
+type DelegateArgs = Static<typeof DelegateParams>;
+
+const StatusParams = Type.Object({});
+
+const CancelParams = Type.Object({
+  runId: Type.String({ description: "The runId returned by acp_delegate to cancel." }),
+});
+
+const agentListLine = (name: string): string => {
+  const def = AGENTS[name];
+  if (!def) return "";
+  const blurb: Record<string, string> = {
+    reviewer: "read-only code review (bugs/risks, file:line)",
+    researcher: "read-only codebase investigation",
+    worker: "make code changes (read+edit+write)",
+    planner: "analyze + propose step-by-step plan (read-only)",
+    oracle: "answer questions / advise (read-only)",
+  };
+  return `  • ${name} — ${blurb[name]} [tools: ${def.tools}]`;
+};
+
+export function makeDelegateTool(pi: ExtensionAPI): ToolDefinition<typeof DelegateParams> {
+  return {
+    name: "acp_delegate",
+    label: "ACP Delegate",
+    description: `Hand a self-contained task to a fresh sub-agent running in a clean context (its own pi process). Use to get focused review/investigation/implementation without polluting the main context, or to run several tasks concurrently.
+
+Agents (pick by name):
+${AGENT_NAMES.map(agentListLine).join("\n")}
+
+Behavior:
+• async=true (default): returns immediately with a runId. The delegate runs in the background; when it finishes its output is injected back into this chat automatically. Call acp_delegate again to launch more in parallel.
+• async=false: blocks until the delegate finishes and returns its output in this tool result.
+
+The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Use acp_delegate_status to list active runs and acp_delegate_cancel to stop one.`,
+    promptSnippet:
+      'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
+    promptGuidelines: [
+      "Delegate to get a focused result in a clean context, or to parallelize independent work.",
+      "The sub-agent has NO access to this conversation — write a fully self-contained task.",
+      "Prefer async=true and launch several; results arrive back automatically when each finishes.",
+      "For changes you must apply yourself, delegate read-only investigation (reviewer/researcher/oracle) and keep the main context as the sole writer.",
+    ],
+    parameters: DelegateParams,
+    async execute(toolCallId, params, signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      const args = params as DelegateArgs;
+      const outcome = await runDelegate(pi, args, ctx, signal);
+      return { details: undefined, content: [{ type: "text", text: outcome }] };
+    },
+  };
+}
+
+export function makeDelegateStatusTool(pi: ExtensionAPI): ToolDefinition<typeof StatusParams> {
+  return {
+    name: "acp_delegate_status",
+    label: "ACP Delegate Status",
+    description:
+      "List active and recently finished background delegates (acp_delegate async runs). Shows runId, agent, status, and elapsed time. Use to check on delegates launched in the background.",
+    promptSnippet: "acp_delegate_status()",
+    promptGuidelines: [],
+    parameters: StatusParams,
+    async execute(): Promise<AgentToolResult<unknown>> {
+      const now = Date.now();
+      const all = Array.from(runs.values()).sort((a, b) => b.startedAt - a.startedAt);
+      const active = all.filter((r) => r.status === "running");
+      const recent = all.filter((r) => r.status !== "running").slice(0, 5);
+      if (all.length === 0) {
+        return { details: undefined, content: [{ type: "text", text: "No delegate runs." }] };
+      }
+      const lines: string[] = [];
+      lines.push(`Active: ${active.length}`);
+      for (const r of active) {
+        const elapsed = Math.round((now - r.startedAt) / 1000);
+        lines.push(
+          `  • ${r.runId} [${r.agent}] running ${elapsed}s — ${truncate(r.task, 80)} (@ ${r.cwd})`,
+        );
+      }
+      if (recent.length > 0) {
+        lines.push("");
+        lines.push("Recent (last 5):");
+        for (const r of recent) {
+          const dur = r.finishedAt ? Math.round((r.finishedAt - r.startedAt) / 1000) : 0;
+          lines.push(
+            `  • ${r.runId} [${r.agent}] ${r.status} (exit ${r.exitCode ?? "?"}, ${dur}s) — ${truncate(r.task, 60)}`,
+          );
+        }
+      }
+      return { details: undefined, content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  };
+}
+
+export function makeDelegateCancelTool(pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
+  return {
+    name: "acp_delegate_cancel",
+    label: "ACP Delegate Cancel",
+    description:
+      "Cancel a background delegate (acp_delegate async run) by runId. Sends SIGTERM to the sub-agent process.",
+    promptSnippet: 'acp_delegate_cancel({ runId: "del_..." })',
+    promptGuidelines: [],
+    parameters: CancelParams,
+    async execute(toolCallId, params): Promise<AgentToolResult<unknown>> {
+      const { runId } = params as Static<typeof CancelParams>;
+      const run = runs.get(runId);
+      if (!run) {
+        return {
+          details: undefined,
+          content: [{ type: "text", text: `Unknown runId "${runId}". Use acp_delegate_status to list runs.` }],
+        };
+      }
+      if (run.status !== "running") {
+        return {
+          details: undefined,
+          content: [{ type: "text", text: `Run ${runId} already ${run.status} (no action).` }],
+        };
+      }
+      run.status = "cancelled";
+      try {
+        run.child?.kill("SIGTERM");
+      } catch (err) {
+        debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
+      }
+      return {
+        details: undefined,
+        content: [{ type: "text", text: `Cancelled ${runId} (${run.agent}).` }],
+      };
+    },
+  };
+}
+
+async function runDelegate(
+  pi: ExtensionAPI,
+  args: DelegateArgs,
+  ctx: ExtensionContext,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const agent = AGENTS[args.agent];
+  if (!agent) {
+    return `Unknown agent "${args.agent}". Choose one of: ${AGENT_NAMES.join(", ")}.`;
+  }
+  const parentDepth = Number(process.env.PI_ACP_DELEGATE_DEPTH ?? "0");
+  if (Number.isNaN(parentDepth) || parentDepth >= MAX_DEPTH) {
+    return `Delegate nesting limit reached (depth ${parentDepth}, max ${MAX_DEPTH}). The delegate cannot spawn further delegates.`;
+  }
+
+  const cwd = args.cwd && args.cwd.trim() ? args.cwd : ctx.cwd;
+  const childEnv = {
+    ...process.env,
+    PI_ACP_DELEGATE_DEPTH: String(parentDepth + 1),
+  };
+
+  const { cliArgs, tmpDir } = await buildChildArgs(args, agent.prompt, ctx);
+  const isAsync = args.async !== false;
+  debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, cliArgs });
+
+  const child = spawn("pi", cliArgs, {
+    cwd,
+    env: childEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  }) as ChildProcess;
+
+  const stdoutChunks: Buffer[] = [];
+  let stderrText = "";
+  child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
+  child.stderr?.on("data", (c: Buffer) => {
+    stderrText += c.toString("utf8");
+  });
+
+  const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const startedAt = Date.now();
+
+  if (isAsync) {
+    // done resolves only after the child exits AND (for async) its result has
+    // been injected into the chat. The drain hook awaits this so pi waits for
+    // background delegates before shutting down.
+    let resolveDone!: () => void;
+    const done = new Promise<void>((r) => {
+      resolveDone = r;
+    });
+    const run: DelegateRun = {
+      runId,
+      agent: args.agent,
+      task: args.task,
+      cwd,
+      startedAt,
+      status: "running",
+      child,
+      done,
+    };
+    runs.set(runId, run);
+
+    child.on("close", (code) => {
+      void cleanupTmp(tmpDir);
+      const output = Buffer.concat(stdoutChunks).toString("utf8").trim();
+      run.status = run.status === "cancelled" ? "cancelled" : code === 0 ? "completed" : "failed";
+      run.finishedAt = Date.now();
+      run.exitCode = code;
+      const injected = injectResult(pi, args.agent, output, code, stderrText, runId);
+      debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length });
+      resolveDone();
+    });
+    child.on("error", (err) => {
+      void cleanupTmp(tmpDir);
+      run.status = "failed";
+      run.finishedAt = Date.now();
+      debug.event("delegate-spawn-error", { runId, error: String(err) });
+      resolveDone();
+    });
+    // Detach so the child survives the tool returning; the drain hook + the
+    // close handler keep it tracked and deliver the result when it finishes.
+    child.unref();
+    return [
+      `Delegated to **${args.agent}** (runId \`${runId}\`).`,
+      `Task: ${truncate(args.task, 160)}`,
+      `Running in the background at \`${cwd}\`.`,
+      ``,
+      `The result will be injected into this chat automatically when it finishes. You may continue with other work now, or launch more delegates in parallel.`,
+      `Tip: use acp_delegate_status() to check active runs, acp_delegate_cancel({runId}) to stop one.`,
+    ].join("\n");
+  }
+
+  // Sync: block until the child finishes (bounded by a timeout).
+  const result = await waitForChild(child, signal);
+  void cleanupTmp(tmpDir);
+  return formatSyncResult(args.agent, result);
+}
+
+async function buildChildArgs(
+  args: DelegateArgs,
+  rolePrompt: string,
+  ctx: ExtensionContext,
+): Promise<{ cliArgs: string[]; tmpDir: string }> {
+  const tmpDir = await mkdtemp(join(tmpdir(), "acp-delegate-"));
+  // Combine the role prompt with a small framing instruction so the child
+  // treats the positional message as the task to execute.
+  const promptFile = join(tmpDir, "role.md");
+  await writeFile(promptFile, `${rolePrompt}\n\n---\n\nComplete the task below.`, "utf8");
+
+  const cliArgs = ["-p", "--no-session", "--append-system-prompt", promptFile];
+
+  if (args.model && args.model.includes("/")) {
+    const [providerId, ...rest] = args.model.split("/");
+    const modelId = rest.join("/");
+    cliArgs.push("--provider", providerId!, "--model", modelId);
+  } else if (ctx.model) {
+    // Inherit the parent's current model so the delegate runs on the same one.
+    cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
+  }
+
+  cliArgs.push(args.task);
+  return { cliArgs, tmpDir };
+}
+
+interface ChildResult {
+  code: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+}
+
+function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Promise<ChildResult> {
+  return new Promise((resolve) => {
+    const stdoutChunks: Buffer[] = [];
+    let stderrText = "";
+    child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
+    child.stderr?.on("data", (c: Buffer) => {
+      stderrText += c.toString("utf8");
+    });
+
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish({ code: null, stdout: "", stderr: stderrText, timedOut: true });
+    }, SYNC_TIMEOUT_MS);
+
+    const onAbort = () => {
+      clearTimeout(timer);
+      child.kill("SIGTERM");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    function finish(r: ChildResult) {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      resolve(r);
+    }
+
+    child.on("close", (code) => {
+      finish({
+        code,
+        stdout: Buffer.concat(stdoutChunks).toString("utf8").trim(),
+        stderr: stderrText,
+        timedOut: false,
+      });
+    });
+    child.on("error", (err) => {
+      finish({ code: null, stdout: "", stderr: err.message, timedOut: false });
+    });
+  });
+}
+
+function formatSyncResult(agent: string, r: ChildResult): string {
+  const header = `Delegate **${agent}** finished (exit ${r.code ?? "?"}${r.timedOut ? ", timed out" : ""}).`;
+  if (r.timedOut || r.code !== 0) {
+    const detail = r.stderr.trim() || "(no stderr)";
+    return `${header}\n\nThe delegate did not complete cleanly:\n\n\`\`\`\n${truncate(detail, 2000)}\n\`\`\``;
+  }
+  const body = r.stdout || "(no output)";
+  return `${header}\n\n${body}`;
+}
+
+function injectResult(
+  pi: ExtensionAPI,
+  agent: string,
+  output: string,
+  code: number | null,
+  stderr: string,
+  runId: string,
+): boolean {
+  const messaging = pi as unknown as MessagingApi;
+  const send = messaging.sendUserMessage;
+  if (typeof send !== "function") {
+    debug.event("delegate-inject-skipped", { runId, reason: "sendUserMessage unavailable" });
+    return false;
+  }
+  const status = code === 0 ? "completed" : "failed";
+  const body = code === 0 ? (output || "(no output)") : (stderr.trim() || output || "(no output)");
+  const text = [
+    `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`,
+    "",
+    truncate(body, 8000),
+  ].join("\n");
+  try {
+    void send(text, { deliverAs: "followUp" });
+    return true;
+  } catch (err) {
+    debug.event("delegate-inject-error", { runId, error: String(err) });
+    return false;
+  }
+}
+
+async function cleanupTmp(tmpDir: string | null): Promise<void> {
+  if (!tmpDir) return;
+  try {
+    await rm(tmpDir, { recursive: true, force: true });
+  } catch {
+    // best-effort
+  }
+}
+
+function truncate(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n - 1) + "…";
+}
