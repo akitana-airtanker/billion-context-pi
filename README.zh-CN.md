@@ -1,11 +1,22 @@
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-# pai-acp
+<p align="center">
+<strong>主动上下文剪枝</strong> — <a href="https://pi.dev">Pi</a> 的 ACP 插件
+<br />
+由模型决定<em>何时</em>压缩、压缩<em>什么</em> — 而非硬性截断。
+</p>
 
-**[Pi](https://pi.dev) 的主动上下文剪枝** — 由模型驱动的上下文压缩,让长对话持续流转而不丢失关键细节。
+---
 
-[![npm version](https://img.shields.io/npm/v/pai-acp.svg)](https://www.npmjs.com/package/pai-acp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<p align="center">
+<a href="https://www.npmjs.com/package/pai-acp"><img src="https://img.shields.io/npm/v/pai-acp.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/ranxianglei/pai-acp/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/pai-acp.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/ranxianglei/pai-acp"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fpai--acp-181717?style=flat-square&logo=github" alt="GitHub"></a>
+</p>
+
+<p align="center">
+<code>pi install npm:pai-acp</code>
+</p>
 
 ---
 

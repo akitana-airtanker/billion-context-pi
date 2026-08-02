@@ -2,10 +2,25 @@
 
 [English](./README.md) | [中文](./README.zh-CN.md)
 
-**Active Context Pruning for [Pi](https://pi.dev)** — model-driven context compression that keeps long conversations flowing without losing important details.
+<p align="center">
+<strong>Active Context Pruning</strong> for <a href="https://pi.dev">Pi</a>
+<br />
+The model decides <em>when</em> and <em>what</em> to compress — not a hard limit.
+</p>
 
-[![npm version](https://img.shields.io/npm/v/pai-acp.svg)](https://www.npmjs.com/package/pai-acp)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+---
+
+<p align="center">
+<a href="https://www.npmjs.com/package/pai-acp"><img src="https://img.shields.io/npm/v/pai-acp.svg?style=flat-square" alt="npm"></a>
+<a href="https://github.com/ranxianglei/pai-acp/blob/master/LICENSE"><img src="https://img.shields.io/npm/l/pai-acp.svg?style=flat-square" alt="license"></a>
+<a href="https://github.com/ranxianglei/pai-acp"><img src="https://img.shields.io/badge/GitHub-ranxianglei%2Fpai--acp-181717?style=flat-square&logo=github" alt="GitHub"></a>
+</p>
+
+<p align="center">
+<code>pi install npm:pai-acp</code>
+</p>
+
+---
 
 ## Why?
 
