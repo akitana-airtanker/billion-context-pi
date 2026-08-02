@@ -58,7 +58,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.1.2",
-    "acp-kernel": "^0.0.14",
+    "acp-kernel": "0.0.14",
     "tsup": "^8.5.1",
     "tsx": "^4.23.1",
     "typescript": "^7.0.2"
