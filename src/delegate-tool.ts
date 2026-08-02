@@ -319,7 +319,7 @@ async function runDelegate(
       }
       void persistResult(runId, body)
         .then((file) => {
-          const injected = injectResult(pi, args.agent, runId, code, file, body);
+          const injected = injectResult(pi, args.agent, runId, args.task, code, file);
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
         })
         .catch((err) => {
@@ -354,7 +354,7 @@ async function runDelegate(
       ? (result.stderr.trim() || "(no stderr)")
       : (result.stdout || "(no output)");
   const file = await persistResult(runId, body);
-  return formatSyncResult(args.agent, runId, result, file);
+  return formatSyncResult(args.agent, runId, args.task, result, file);
 }
 
 async function buildChildArgs(
@@ -429,20 +429,23 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
   });
 }
 
-function formatSyncResult(agent: string, runId: string, r: ChildResult, file: string): string {
+function formatSyncResult(agent: string, runId: string, task: string, r: ChildResult, file: string): string {
   const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "failed";
   const header = `Delegate **${agent}** ${status} (runId \`${runId}\`, exit ${r.code ?? "?"}).`;
-  const body = r.timedOut || r.code !== 0 ? (r.stderr.trim() || "(no stderr)") : (r.stdout || "(no output)");
-  return formatPayload(header, runId, file, body);
+  if (r.code === 0 && !r.timedOut) {
+    return formatPayload(header, file, task);
+  }
+  const body = r.timedOut ? "(timed out)" : (r.stderr.trim() || "(no stderr)");
+  return formatPayload(header, file, task, body);
 }
 
 function injectResult(
   pi: ExtensionAPI,
   agent: string,
   runId: string,
+  task: string,
   code: number | null,
   file: string,
-  body: string,
 ): boolean {
   const send = pi.sendUserMessage;
   if (typeof send !== "function") {
@@ -451,7 +454,7 @@ function injectResult(
   }
   const status = code === 0 ? "completed" : "failed";
   const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`;
-  const text = formatPayload(header, runId, file, body);
+  const text = formatPayload(header, file, task);
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
     // follow-up turn. Interactive/rpc sessions consume it via their main loop;
@@ -464,20 +467,22 @@ function injectResult(
   }
 }
 
-// Build the lightweight payload delivered to the model/user: a header, the
-// result file path (full output lives there), and a short preview. Keeping
-// the in-context footprint small preserves the point of delegating.
-function formatPayload(header: string, runId: string, file: string, body: string): string {
-  const lines: string[] = [header, ""];
+// Build the lightweight payload: a header, the task title (so the model
+// recognizes what finished — it dispatched the task, so the title suffices),
+// and the result file path. NO preview: the model uses `read` for details,
+// and that read (not this message) is the large content. Keeping this minimal
+// means it stays cheap to retain in context (or to compress away).
+function formatPayload(header: string, file: string, task: string, body?: string): string {
+  const lines: string[] = [header, "", `Task: ${truncate(task, 160)}`];
   if (file) {
-    lines.push(`Full result: \`${file}\``);
-    lines.push("(use the `read` tool to open it if you need the details)");
+    lines.push(``, `Full result: \`${file}\``, "(use the `read` tool to open it if you need the details)");
   } else {
-    lines.push("(result could not be persisted to a file)");
+    lines.push("", "(result could not be persisted to a file)");
+  }
+  if (body) {
+    lines.push("", "Output:", "~~~", truncate(body, RESULT_SUMMARY_CHARS), "~~~");
   }
   lines.push("");
-  lines.push("Preview (first lines):", "~~~", truncate(body, RESULT_SUMMARY_CHARS), "~~~", "");
-  void runId;
   return lines.join("\n");
 }
 
