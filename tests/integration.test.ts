@@ -87,6 +87,25 @@ test("context handler tags every message with a ref even when length matches eve
   assert.ok(firstContent.some((b: any) => b.type === "text" && b.text.includes("m0000")), "first msg ref-tagged");
 });
 
+test("system prompt sources compression rules from acp-kernel (no hardcoded drift, no markers)", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  const sp = result.systemPrompt;
+  // kernel constants inlined (regression guard against reverting to a hardcoded copy)
+  assert.ok(sp.includes("Work from summaries, not raw tool outputs"), "kernel COMPRESS_PHILOSOPHY inlined");
+  assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
+  assert.ok(sp.includes("TIER 2 COMPRESSION"), "kernel TIER2_DISTILL_RULES inlined");
+  assert.ok(sp.includes("TIER 3 COMPRESSION"), "kernel TIER3_CONDENSE_RULES inlined");
+  // marker system removed entirely from kernel constants
+  assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
+  assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");
+  assert.ok(!sp.includes("KEEP MARKERS"), "no KEEP MARKERS section");
+  // old hardcoded copy removed
+  assert.ok(!sp.includes("Two failure modes to avoid"), "old hardcoded philosophy removed");
+  assert.ok(!sp.includes("Over-compression: Compressing too aggressively"), "old hardcoded over/under-compression section removed");
+});
+
 test("context handler persists state so a second call is idempotent on the same entries", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
