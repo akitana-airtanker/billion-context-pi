@@ -74,10 +74,6 @@ interface DelegateRun {
   status: RunStatus;
   exitCode?: number | null;
   child?: ChildProcess;
-  // Resolves when the child has fully exited AND its result (if async) has
-  // been injected into the parent chat. Used by acp_delegate_status to report
-  // completion; best-effort (pi's sendUserMessage is fire-and-forget).
-  done: Promise<void>;
 }
 
 const runs = new Map<string, DelegateRun>();
@@ -246,6 +242,9 @@ async function runDelegate(
   if (Number.isNaN(parentDepth) || parentDepth >= MAX_DEPTH) {
     return `Delegate nesting limit reached (depth ${parentDepth}, max ${MAX_DEPTH}). The delegate cannot spawn further delegates.`;
   }
+  if (!args.task || !args.task.trim()) {
+    return `Task must be a non-empty string. Got: ${JSON.stringify(args.task).slice(0, 60)}`;
+  }
 
   const cwd = args.cwd && args.cwd.trim() ? args.cwd : ctx.cwd;
   const childEnv = {
@@ -272,26 +271,28 @@ async function runDelegate(
   }) as ChildProcess;
   // Pass the task via stdin (not argv) so tasks starting with `-` are not
   // mis-parsed as CLI options. pi reads piped stdin as the prompt in print mode.
+  // N1: a fast-exiting child (bad provider, ENOENT, SIGTERM) closes the pipe
+  // before we finish writing → EPIPE → 'error' on stdin. Without a listener
+  // that becomes an uncaughtException and can crash the host pi. Attach an
+  // error listener so the event is swallowed and logged.
+  child.stdin?.once("error", (e: Error) => {
+    debug.event("delegate-stdin-error", { runId: "pre-spawn", error: String(e) });
+  });
   child.stdin?.end(args.task);
 
-  const stdoutChunks: Buffer[] = [];
+  // stdout/stderr buffering is only needed by the async path (the sync path
+  // attaches its own listeners in waitForChild). Attach lazily to avoid double
+  // buffering in sync mode.
+  let stdoutChunks: Buffer[] = [];
   let stderrText = "";
-  child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
-  child.stderr?.on("data", (c: Buffer) => {
-    stderrText += c.toString("utf8");
-  });
 
   const runId = `del_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const startedAt = Date.now();
 
   if (isAsync) {
-    // done resolves when the child exits AND its result has been persisted
-    // (and best-effort injected via sendUserMessage). Used by acp_delegate_status
-    // to report completion. sendUserMessage is fire-and-forget, so injection is
-    // best-effort — not awaited (no API to await a turn).
-    let resolveDone!: () => void;
-    const done = new Promise<void>((r) => {
-      resolveDone = r;
+    child.stdout?.on("data", (c: Buffer) => stdoutChunks.push(c));
+    child.stderr?.on("data", (c: Buffer) => {
+      stderrText += c.toString("utf8");
     });
     const run: DelegateRun = {
       runId,
@@ -301,7 +302,6 @@ async function runDelegate(
       startedAt,
       status: "running",
       child,
-      done,
     };
     runs.set(runId, run);
 
@@ -312,6 +312,11 @@ async function runDelegate(
       run.finishedAt = Date.now();
       run.exitCode = code;
       const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
+      // N2: don't inject a (misleading "failed") notification for cancelled runs.
+      if (run.status === "cancelled") {
+        debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
+        return;
+      }
       void persistResult(runId, body)
         .then((file) => {
           const injected = injectResult(pi, args.agent, runId, code, file, body);
@@ -319,15 +324,13 @@ async function runDelegate(
         })
         .catch((err) => {
           debug.event("delegate-done-error", { runId, error: String(err) });
-        })
-        .finally(resolveDone);
+        });
     });
     child.on("error", (err) => {
       void cleanupTmp(tmpDir);
       run.status = "failed";
       run.finishedAt = Date.now();
       debug.event("delegate-spawn-error", { runId, error: String(err) });
-      resolveDone();
     });
     // Detach so the child survives the tool returning. Injection is best-effort:
     // the close handler calls sendUserMessage (fire-and-forget) to notify the
