@@ -270,7 +270,16 @@ async function runDelegate(
   };
 
   const { cliArgs, tmpDir } = await buildChildArgs(args, agent.prompt, ctx);
-  const isAsync = args.async !== false;
+  // Auto-downgrade to sync in non-interactive modes (print/json = `pi -p` / SDK).
+  // In those modes the parent exits after one turn, so async injection (which
+  // fires a follow-up turn) is never observed. Sync returns the result as the
+  // tool result within the same turn — the model sees it and the output is
+  // captured. Interactive (tui) keeps true async + drain + injection.
+  const requestedAsync = args.async !== false;
+  const isAsync = requestedAsync && ctx.mode === "tui";
+  if (requestedAsync && !isAsync) {
+    debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
+  }
   debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, cliArgs });
 
   const child = spawn("pi", cliArgs, {
@@ -316,8 +325,8 @@ async function runDelegate(
       run.finishedAt = Date.now();
       run.exitCode = code;
       const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
-      void persistResult(runId, body).then((file) => {
-        const injected = injectResult(pi, args.agent, runId, code, file, body);
+      void persistResult(runId, body).then(async (file) => {
+        const injected = await injectResult(pi, args.agent, runId, code, file, body);
         debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
         resolveDone();
       });
@@ -433,14 +442,14 @@ function formatSyncResult(agent: string, runId: string, r: ChildResult, file: st
   return formatPayload(header, runId, file, body);
 }
 
-function injectResult(
+async function injectResult(
   pi: ExtensionAPI,
   agent: string,
   runId: string,
   code: number | null,
   file: string,
   body: string,
-): boolean {
+): Promise<boolean> {
   const messaging = pi as unknown as MessagingApi;
   const send = messaging.sendUserMessage;
   if (typeof send !== "function") {
@@ -451,7 +460,11 @@ function injectResult(
   const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`;
   const text = formatPayload(header, runId, file, body);
   try {
-    void send(text, { deliverAs: "followUp" });
+    // MUST await: sendUserMessage starts a new agent turn when the parent is
+    // idle (non-streaming). The drain hook awaits this run's `done` promise,
+    // which resolves only after this returns — so awaiting keeps the process
+    // alive until the injected turn completes (critical for print/run mode).
+    await send(text, { deliverAs: "followUp" });
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
