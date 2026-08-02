@@ -97,7 +97,7 @@ const DelegateParams = Type.Object({
   ),
   async: Type.Optional(
     Type.Boolean({
-      description: "If true (default), return immediately with a runId; the result is injected into chat when the delegate finishes. If false, block until the delegate finishes and return its output here.",
+      description: "If true (default), return immediately with a runId. In long-lived sessions (interactive/rpc) a short notification is injected into chat when the delegate finishes; in one-shot sessions (print/json, e.g. `pi -p` / SDK) async auto-downgrades to sync and the result is returned here. If false, always block and return the output here.",
     }),
   ),
 });
@@ -133,7 +133,7 @@ Agents (pick by name):
 ${AGENT_NAMES.map(agentListLine).join("\n")}
 
 Behavior:
-• async=true (default): returns immediately with a runId. The delegate runs in the background; when it finishes its full output is saved to a file and a short notification (status + file path + preview) is injected back into this chat. Use acp_delegate_status / acp_delegate_cancel to manage runs. Call acp_delegate again to launch more in parallel.
+• async=true (default): returns immediately with a runId. The delegate runs in the background. In long-lived sessions (interactive/rpc) a short notification (status + file path + preview) is injected back into this chat when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Use acp_delegate_status / acp_delegate_cancel to manage runs. Call acp_delegate again to launch more in parallel.
 • async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path plus a short preview. Use the \`read\` tool to open the file for the complete content.
 
 The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small; only a preview is shown inline.`,
@@ -285,9 +285,10 @@ async function runDelegate(
   const startedAt = Date.now();
 
   if (isAsync) {
-    // done resolves only after the child exits AND (for async) its result has
-    // been injected into the chat. The drain hook awaits this so pi waits for
-    // background delegates before shutting down.
+    // done resolves when the child exits AND its result has been persisted
+    // (and best-effort injected via sendUserMessage). Used by acp_delegate_status
+    // to report completion. sendUserMessage is fire-and-forget, so injection is
+    // best-effort — not awaited (no API to await a turn).
     let resolveDone!: () => void;
     const done = new Promise<void>((r) => {
       resolveDone = r;
