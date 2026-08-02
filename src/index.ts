@@ -12,6 +12,7 @@ import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
+import { makeDelegateTool, makeDelegateStatusTool, makeDelegateCancelTool } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -34,6 +35,12 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
+    // acp_delegate is independent of the ACP runtime (it only uses pi APIs),
+    // so it receives `pi` directly rather than the AcpRuntime. Kept in pai-acp
+    // for single-plugin simplicity; isolated in its own module for cleanliness.
+    pi.registerTool(makeDelegateTool(pi));
+    pi.registerTool(makeDelegateStatusTool(pi));
+    pi.registerTool(makeDelegateCancelTool(pi));
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
     }
@@ -47,6 +54,10 @@ export default createAcpExtension();
 function wireCompactionDisable(pi: ExtensionAPI): void {
   pi.on("session_before_compact", () => ({ cancel: true }));
 }
+
+// (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
+// in pi, and interactive/rpc sessions are long-lived so their main loop
+// consumes the follow-up queue naturally — no shutdown drain needed.)
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
