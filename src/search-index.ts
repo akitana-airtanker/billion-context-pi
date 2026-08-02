@@ -3,13 +3,16 @@
  *
  * Builds SearchDoc[] from:
  *  1. All compression blocks (active AND inactive) — via blockDocs()
- *  2. All historical messages from the append-only session log — via getEntries()
+ *  2. Historical messages that compression folded into a block summary.
  *
- * Each historical message is mapped to the block that compressed it (if any),
- * so a message hit tells the model exactly which block to decompress for the
- * surrounding detail. Messages still visible in context have no owning block.
+ * Which messages are searchable? Those covered by SOME block's
+ * effectiveMessageIds — i.e. messages that were compressed into a summary and
+ * are no longer individually visible. Messages still live in context (not in
+ * any block) are skipped: the model can already see them.
  *
- * Token estimates use the same chars/4 + CJK heuristic as the kernel.
+ * We deliberately do NOT use pi's buildContextEntries for the visible check:
+ * ACP prunes messages itself (no pi `compaction` entry is written), so pi
+ * reports ALL entries as in-context. The ACP state is the source of truth.
  */
 
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
@@ -17,19 +20,26 @@ import { blockDocs, messageDocs, type SearchDoc, type MessageInput, type Message
 import { entriesToCoreMessages } from "./messages.js";
 import type { CompressionState } from "acp-kernel";
 
-/** ref prefix → owning blockId, built from every block's effectiveMessageIds. */
+/** All message refs covered by any block (active or inactive). */
+function buildCoveredRefs(state: CompressionState): Set<string> {
+    const s = new Set<string>();
+    for (const b of state.blocks) {
+        for (const id of b.effectiveMessageIds) s.add(id);
+    }
+    return s;
+}
+
+/** ref → owning blockId (first/earliest block wins — outermost summary). */
 function buildMessageOwnerMap(state: CompressionState): Map<string, string> {
     const m = new Map<string, string>();
     for (const b of state.blocks) {
         for (const id of b.effectiveMessageIds) {
-            // first block (lowest tier, earliest) wins — outermost summary owns it
             if (!m.has(id)) m.set(id, b.blockId);
         }
     }
     return m;
 }
 
-/** Estimate tokens with CJK awareness (matches kernel defaultCountTokens). */
 function estimateTokens(text: string): number {
     if (!text) return 0;
     const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
@@ -37,7 +47,6 @@ function estimateTokens(text: string): number {
     return cjkCount + Math.ceil((text.length - cjkCount) / 4);
 }
 
-/** Map pi message role → acp-kernel MessageRole. Tool calls count as assistant. */
 function toRole(entry: SessionMessageEntry): MessageRole | null {
     const role = entry.message.role;
     if (role === "user") return "user";
@@ -46,26 +55,11 @@ function toRole(entry: SessionMessageEntry): MessageRole | null {
     return null;
 }
 
-/**
- * Build the full searchable document set for one session.
- * Called per searchBlocks invocation. Reads are cheap (in-memory entry tree).
- *
- * Visibility check: ACP does NOT write pi `compaction` entries (it prunes
- * messages itself in processTurn), so pi's buildContextEntries returns ALL
- * entries. The real visible set is the post-prune coreMessages from stateFor.
- */
-export function buildSearchDocs(
-    ctx: ExtensionContext,
-    state: CompressionState,
-    visibleCoreMessages: { id?: string }[],
-): SearchDoc[] {
+export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState): SearchDoc[] {
     const sm = ctx.sessionManager;
     const allEntries: SessionEntry[] = sm.getEntries();
+    const covered = buildCoveredRefs(state);
     const ownerMap = buildMessageOwnerMap(state);
-
-    // Visible = the post-prune messages ACP actually keeps in context.
-    const liveIds = new Set<string>();
-    for (const m of visibleCoreMessages) if (m.id) liveIds.add(m.id);
 
     const blockTier = new Map<string, number>();
     for (const b of state.blocks) blockTier.set(b.blockId, b.tier ?? 1);
@@ -79,8 +73,9 @@ export function buildSearchDocs(
         const cores = entriesToCoreMessages([entry]);
         for (const cm of cores) {
             if (!cm.id) continue;
-            // skip messages still visible in context — model can already see them
-            if (liveIds.has(cm.id)) continue;
+            // Only include messages that were compressed into a block.
+            // Still-live messages are visible to the model — no need to search them.
+            if (!covered.has(cm.id)) continue;
             const text = cm.text ?? "";
             if (!text || text.length < 2) continue;
             const ownerBlock = ownerMap.get(cm.id);
