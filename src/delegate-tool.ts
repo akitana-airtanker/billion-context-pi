@@ -1,5 +1,8 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, mkdtemp, writeFile, rm, writeFile as writeFileAtomic } from "node:fs/promises";
+import {
+  spawn,
+  type ChildProcess,
+} from "node:child_process";
+import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
@@ -10,16 +13,6 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { debug } from "./log.js";
-
-// `sendUserMessage` exists on the ExtensionAPI at runtime (dynamically attached
-// by pi's extension runner / loader) even though the published type declaration
-// omits it. We narrow-cast to call it without resorting to `as any`.
-type MessagingApi = {
-  sendUserMessage?: (
-    content: string,
-    options?: { deliverAs?: "steer" | "followUp" },
-  ) => Promise<void> | void;
-};
 
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
@@ -81,22 +74,13 @@ interface DelegateRun {
   status: RunStatus;
   exitCode?: number | null;
   child?: ChildProcess;
-  // Resolves when the child has fully exited AND its result (if async) has been
-  // injected into the parent chat. Used by the drain hook so pi waits for
-  // background delegates before shutting down.
+  // Resolves when the child has fully exited AND its result (if async) has
+  // been injected into the parent chat. Used by acp_delegate_status to report
+  // completion; best-effort (pi's sendUserMessage is fire-and-forget).
   done: Promise<void>;
 }
 
 const runs = new Map<string, DelegateRun>();
-
-/** Resolve all currently-running background delegates' done promises. */
-export function pendingDelegateRuns(): Promise<unknown>[] {
-  const pending: Promise<unknown>[] = [];
-  for (const r of runs.values()) {
-    if (r.status === "running") pending.push(r.done.catch(() => {}));
-  }
-  return pending;
-}
 
 const DelegateParams = Type.Object({
   agent: Type.String({
@@ -270,13 +254,12 @@ async function runDelegate(
   };
 
   const { cliArgs, tmpDir } = await buildChildArgs(args, agent.prompt, ctx);
-  // Auto-downgrade to sync in non-interactive modes (print/json = `pi -p` / SDK).
-  // In those modes the parent exits after one turn, so async injection (which
-  // fires a follow-up turn) is never observed. Sync returns the result as the
-  // tool result within the same turn — the model sees it and the output is
-  // captured. Interactive (tui) keeps true async + drain + injection.
+  // One-shot modes (print/json = `pi -p` / SDK) exit after one turn, so async
+  // injection (a follow-up turn) is never observed. Downgrade to sync there:
+  // the result returns as the tool result within the same turn. Long-lived
+  // modes (tui/rpc) keep true async + injection (consumed by the main loop).
   const requestedAsync = args.async !== false;
-  const isAsync = requestedAsync && ctx.mode === "tui";
+  const isAsync = requestedAsync && ctx.mode !== "print" && ctx.mode !== "json";
   if (requestedAsync && !isAsync) {
     debug.event("delegate-async-downgraded", { reason: `mode=${ctx.mode}` });
   }
@@ -325,11 +308,15 @@ async function runDelegate(
       run.finishedAt = Date.now();
       run.exitCode = code;
       const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
-      void persistResult(runId, body).then(async (file) => {
-        const injected = await injectResult(pi, args.agent, runId, code, file, body);
-        debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
-        resolveDone();
-      });
+      void persistResult(runId, body)
+        .then((file) => {
+          const injected = injectResult(pi, args.agent, runId, code, file, body);
+          debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
+        })
+        .catch((err) => {
+          debug.event("delegate-done-error", { runId, error: String(err) });
+        })
+        .finally(resolveDone);
     });
     child.on("error", (err) => {
       void cleanupTmp(tmpDir);
@@ -338,8 +325,9 @@ async function runDelegate(
       debug.event("delegate-spawn-error", { runId, error: String(err) });
       resolveDone();
     });
-    // Detach so the child survives the tool returning; the drain hook + the
-    // close handler keep it tracked and deliver the result when it finishes.
+    // Detach so the child survives the tool returning. Injection is best-effort:
+    // the close handler calls sendUserMessage (fire-and-forget) to notify the
+    // parent chat; interactive/rpc sessions consume it via their main loop.
     child.unref();
     return [
       `Delegated to **${args.agent}** (runId \`${runId}\`).`,
@@ -384,7 +372,7 @@ async function buildChildArgs(
     cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
   }
 
-  cliArgs.push(args.task);
+  cliArgs.push("--", args.task);
   return { cliArgs, tmpDir };
 }
 
@@ -442,16 +430,15 @@ function formatSyncResult(agent: string, runId: string, r: ChildResult, file: st
   return formatPayload(header, runId, file, body);
 }
 
-async function injectResult(
+function injectResult(
   pi: ExtensionAPI,
   agent: string,
   runId: string,
   code: number | null,
   file: string,
   body: string,
-): Promise<boolean> {
-  const messaging = pi as unknown as MessagingApi;
-  const send = messaging.sendUserMessage;
+): boolean {
+  const send = pi.sendUserMessage;
   if (typeof send !== "function") {
     debug.event("delegate-inject-skipped", { runId, reason: "sendUserMessage unavailable" });
     return false;
@@ -460,11 +447,10 @@ async function injectResult(
   const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`;
   const text = formatPayload(header, runId, file, body);
   try {
-    // MUST await: sendUserMessage starts a new agent turn when the parent is
-    // idle (non-streaming). The drain hook awaits this run's `done` promise,
-    // which resolves only after this returns — so awaiting keeps the process
-    // alive until the injected turn completes (critical for print/run mode).
-    await send(text, { deliverAs: "followUp" });
+    // sendUserMessage is fire-and-forget (returns void): it enqueues a
+    // follow-up turn. Interactive/rpc sessions consume it via their main loop;
+    // injection at shutdown is best-effort (no API to await a turn).
+    send.call(pi, text, { deliverAs: "followUp" });
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
@@ -500,7 +486,7 @@ async function persistResult(runId: string, body: string): Promise<string> {
   }
   const file = join(OUT_DIR, `${runId}.out`);
   try {
-    await writeFileAtomic(file, body, "utf8");
+    await writeFile(file, body, "utf8");
     return file;
   } catch (err) {
     debug.event("delegate-persist-error", { runId, file, error: String(err) });
