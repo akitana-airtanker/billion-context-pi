@@ -94,7 +94,54 @@ PR merges are **human-only**. The Agent MUST NEVER merge any PR.
 
 ## 5. Release Workflow
 
-Same as acp-kernel. Release branches: `YYYY-MM-DD_release-v{VERSION}`.
+Same baseline as acp-kernel (branch naming, CI auto-publish, PR-merge-is-human-only, pre-flight checks, release-commit convention). See [acp-kernel AGENTS.md §5](https://github.com/ranxianglei/acp-kernel/blob/master/AGENTS.md). Release branches: `YYYY-MM-DD_release-v{VERSION}`.
+
+### Cross-repo dependency: acp-kernel MUST ship first
+
+`acp-kernel` is pinned in **devDependencies** (exact version, no `^`) and **bundled inline** at build time (tsup does NOT mark it `external`), so `dist/index.js` is self-contained.
+
+⚠️ **Publishing order is strict:**
+1. Release `acp-kernel` first (open + merge its release PR, wait for CI publish).
+2. **Verify it is live on npm:** `npm view acp-kernel version` returns the new version.
+3. THEN release pai-acp.
+
+Rationale: pai-acp CI runs `npm ci`, which installs the exact `acp-kernel` version pinned in `package.json`. A release branch that bumps `acp-kernel` to a not-yet-published version fails CI at install time.
+
+### Local pre-validation (saves a round-trip)
+
+Before waiting for npm, validate the upgrade path locally using acp-kernel's own master build (skip if acp-kernel is already published):
+
+```bash
+# 1. In acp-kernel (on master):
+npm run build
+
+# 2. In pai-acp: overlay the new dist onto node_modules (local only, do NOT commit)
+cp ~/projects/acp-kernel/dist/index.js     node_modules/acp-kernel/dist/index.js
+cp ~/projects/acp-kernel/dist/index.js.map node_modules/acp-kernel/dist/index.js.map
+
+# 3. Bump package.json (both lines, see below), then run pai-acp CI checks
+npm run typecheck && npm test && npm run build
+```
+
+### pai-acp release commit — TWO version fields
+
+Unlike acp-kernel (one line), a pai-acp release commit bumps BOTH its own version AND the `acp-kernel` dependency:
+
+```diff
+   "name": "pai-acp",
+-  "version": "0.1.12",
++  "version": "0.1.13",
+   ...
+-  "acp-kernel": "0.0.14",
++  "acp-kernel": "0.0.15",
+```
+
+After editing, refresh the lockfile and commit it together:
+```bash
+npm install                              # updates package-lock.json
+npm run typecheck && npm test && npm run build
+```
+Commit message: `release v{VERSION}` (same convention as acp-kernel). The commit touches `package.json` + `package-lock.json` (2 files).
 
 ## 6. npm Publishing
 
