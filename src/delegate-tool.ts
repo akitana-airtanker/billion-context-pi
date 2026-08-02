@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, writeFile as writeFileAtomic } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
@@ -23,6 +23,8 @@ type MessagingApi = {
 
 const MAX_DEPTH = 2;
 const SYNC_TIMEOUT_MS = 5 * 60_000;
+const RESULT_SUMMARY_CHARS = 500;
+const OUT_DIR = join(tmpdir(), "acp-delegate");
 
 interface AgentDef {
   prompt: string;
@@ -147,10 +149,10 @@ Agents (pick by name):
 ${AGENT_NAMES.map(agentListLine).join("\n")}
 
 Behavior:
-• async=true (default): returns immediately with a runId. The delegate runs in the background; when it finishes its output is injected back into this chat automatically. Call acp_delegate again to launch more in parallel.
-• async=false: blocks until the delegate finishes and returns its output in this tool result.
+• async=true (default): returns immediately with a runId. The delegate runs in the background; when it finishes its full output is saved to a file and a short notification (status + file path + preview) is injected back into this chat. Use acp_delegate_status / acp_delegate_cancel to manage runs. Call acp_delegate again to launch more in parallel.
+• async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path plus a short preview. Use the \`read\` tool to open the file for the complete content.
 
-The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Use acp_delegate_status to list active runs and acp_delegate_cancel to stop one.`,
+The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small; only a preview is shown inline.`,
     promptSnippet:
       'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
     promptGuidelines: [
@@ -313,9 +315,12 @@ async function runDelegate(
       run.status = run.status === "cancelled" ? "cancelled" : code === 0 ? "completed" : "failed";
       run.finishedAt = Date.now();
       run.exitCode = code;
-      const injected = injectResult(pi, args.agent, output, code, stderrText, runId);
-      debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length });
-      resolveDone();
+      const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
+      void persistResult(runId, body).then((file) => {
+        const injected = injectResult(pi, args.agent, runId, code, file, body);
+        debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
+        resolveDone();
+      });
     });
     child.on("error", (err) => {
       void cleanupTmp(tmpDir);
@@ -332,7 +337,7 @@ async function runDelegate(
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
       ``,
-      `The result will be injected into this chat automatically when it finishes. You may continue with other work now, or launch more delegates in parallel.`,
+      `The full output will be saved to a file; a short notification (path + preview) will be injected here when it finishes. You may continue with other work now, or launch more delegates in parallel.`,
       `Tip: use acp_delegate_status() to check active runs, acp_delegate_cancel({runId}) to stop one.`,
     ].join("\n");
   }
@@ -340,7 +345,12 @@ async function runDelegate(
   // Sync: block until the child finishes (bounded by a timeout).
   const result = await waitForChild(child, signal);
   void cleanupTmp(tmpDir);
-  return formatSyncResult(args.agent, result);
+  const body =
+    result.timedOut || result.code !== 0
+      ? (result.stderr.trim() || "(no stderr)")
+      : (result.stdout || "(no output)");
+  const file = await persistResult(runId, body);
+  return formatSyncResult(args.agent, runId, result, file);
 }
 
 async function buildChildArgs(
@@ -416,23 +426,20 @@ function waitForChild(child: ChildProcess, signal: AbortSignal | undefined): Pro
   });
 }
 
-function formatSyncResult(agent: string, r: ChildResult): string {
-  const header = `Delegate **${agent}** finished (exit ${r.code ?? "?"}${r.timedOut ? ", timed out" : ""}).`;
-  if (r.timedOut || r.code !== 0) {
-    const detail = r.stderr.trim() || "(no stderr)";
-    return `${header}\n\nThe delegate did not complete cleanly:\n\n\`\`\`\n${truncate(detail, 2000)}\n\`\`\``;
-  }
-  const body = r.stdout || "(no output)";
-  return `${header}\n\n${body}`;
+function formatSyncResult(agent: string, runId: string, r: ChildResult, file: string): string {
+  const status = r.timedOut ? "timed out" : r.code === 0 ? "completed" : "failed";
+  const header = `Delegate **${agent}** ${status} (runId \`${runId}\`, exit ${r.code ?? "?"}).`;
+  const body = r.timedOut || r.code !== 0 ? (r.stderr.trim() || "(no stderr)") : (r.stdout || "(no output)");
+  return formatPayload(header, runId, file, body);
 }
 
 function injectResult(
   pi: ExtensionAPI,
   agent: string,
-  output: string,
-  code: number | null,
-  stderr: string,
   runId: string,
+  code: number | null,
+  file: string,
+  body: string,
 ): boolean {
   const messaging = pi as unknown as MessagingApi;
   const send = messaging.sendUserMessage;
@@ -441,18 +448,50 @@ function injectResult(
     return false;
   }
   const status = code === 0 ? "completed" : "failed";
-  const body = code === 0 ? (output || "(no output)") : (stderr.trim() || output || "(no output)");
-  const text = [
-    `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`,
-    "",
-    truncate(body, 8000),
-  ].join("\n");
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`;
+  const text = formatPayload(header, runId, file, body);
   try {
     void send(text, { deliverAs: "followUp" });
     return true;
   } catch (err) {
     debug.event("delegate-inject-error", { runId, error: String(err) });
     return false;
+  }
+}
+
+// Build the lightweight payload delivered to the model/user: a header, the
+// result file path (full output lives there), and a short preview. Keeping
+// the in-context footprint small preserves the point of delegating.
+function formatPayload(header: string, runId: string, file: string, body: string): string {
+  const lines: string[] = [header, ""];
+  if (file) {
+    lines.push(`Full result: \`${file}\``);
+    lines.push("(use the `read` tool to open it if you need the details)");
+  } else {
+    lines.push("(result could not be persisted to a file)");
+  }
+  lines.push("");
+  lines.push("Preview (first lines):", "```", truncate(body, RESULT_SUMMARY_CHARS), "```", "");
+  void runId;
+  return lines.join("\n");
+}
+
+/** Persist the full delegate output to a stable file and return its path.
+ *  The file outlives the run so the model (or the user) can read it later
+ *  instead of carrying the full payload in the chat context. */
+async function persistResult(runId: string, body: string): Promise<string> {
+  try {
+    await mkdir(OUT_DIR, { recursive: true });
+  } catch {
+    // directory may already exist — ignore
+  }
+  const file = join(OUT_DIR, `${runId}.out`);
+  try {
+    await writeFileAtomic(file, body, "utf8");
+    return file;
+  } catch (err) {
+    debug.event("delegate-persist-error", { runId, file, error: String(err) });
+    return "";
   }
 }
 
