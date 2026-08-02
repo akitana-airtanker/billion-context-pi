@@ -1,5 +1,7 @@
 # pai-acp
 
+[English](./README.md) | [中文](./README.zh-CN.md)
+
 **Active Context Pruning for [Pi](https://pi.dev)** — model-driven context compression that keeps long conversations flowing without losing important details.
 
 [![npm version](https://img.shields.io/npm/v/pai-acp.svg)](https://www.npmjs.com/package/pai-acp)
