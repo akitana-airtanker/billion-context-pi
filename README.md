@@ -32,6 +32,11 @@ Unlike Pi's built-in auto-compaction (which replaces everything with a single su
 - **Searchable** — `search_context` finds information inside compressed blocks without decompressing
 - **Selective** — protected tools, user messages, and the recent working set are never compressed
 
+This means:
+
+1. **A single session handles enormous workloads.** Per simulation tests of the three-tier architecture (see [opencode-acp](https://github.com/ranxianglei/opencode-acp)), one session can process on the order of 10–60 billion cumulative tokens — while retaining long-term memory of distant key information (paths, decisions, signatures). You can work in the **same session for months** without outgrowing the context.
+2. **Context stays lean over the long run.** In practice context typically holds under ~150K tokens (opencode-acp keeps it under ~200K), so compared to traditional compaction that lets context balloon toward 1M, **a single session costs roughly 5× less in tokens**.
+
 ## Install
 
 ```bash
