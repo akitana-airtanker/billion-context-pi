@@ -1,9 +1,16 @@
+import {
+  COMPRESS_PHILOSOPHY,
+  HOW_TO_COMPRESS_RULES,
+  TIER2_DISTILL_RULES,
+  TIER3_CONDENSE_RULES,
+} from "acp-kernel";
+
 export const ACP_SYSTEM_PROMPT = `
 ACP context management
 
 ACP TAGS
 
-Each user and tool message has an \x3cacp tokens="2.1K" type="bash"\x3em00175\x3c/acp\x3e tag showing its ref (mNNNNN), approximate token size, and content type. Assistant messages are untagged — infer their refs from adjacent tagged messages. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g., m00005) inside compress calls — never the XML wrapper.
+Each user and tool message has an \x3cacp tokens="2.1K" type="bash"\x3em00175\x3c/acp\x3e tag showing its ref (mNNNNN), approximate token size, and content type. Assistant messages are untagged — infer their refs from adjacent tagged messages. These tags are system metadata injected by the context manager. NEVER echo, repeat, or reference these XML tags in your responses. Use only the ref ID (e.g. m00005) inside compress calls — never the XML wrapper.
 
 COMPRESSION SUMMARIES IN CONTEXT
 
@@ -22,13 +29,7 @@ You have four context-management tools:
 - search_context — Search compressed block summaries (and optionally visible messages) by keyword. Use BEFORE decompressing to find the right block. Example: search_context({ query: "auth token refresh" }).
 - acp_status — Context status with compressible ranges. No args = overview + totals. scope:"uncompressed" for range view; add view:"messages" for per-message listing. scope:"compressed" for block details.
 
-COMPRESSION PHILOSOPHY
-
-Two failure modes to avoid:
-- Over-compression: Compressing too aggressively loses critical details, decisions, and state needed for your task. This directly harms task quality.
-- Under-compression: Failing to compress verbose outputs causes context overflow, reducing accuracy and eventually blocking your work.
-
-Balance is key. The single test for whether to compress is: "Is this content still needed by the current task step?" If yes, keep it. If no, compress it.
+${COMPRESS_PHILOSOPHY}
 
 WHEN TO COMPRESS
 
@@ -43,43 +44,20 @@ WHEN TO COMPRESS
 WHEN NOT TO COMPRESS
 
 - Content the current task step is actively reading or reasoning about.
-- Important user messages — preserve their exact intent, constraints, and acceptance criteria verbatim.
+- Important user messages — preserve their exact intent, constraints, and acceptance criteria. If a message in the range must stay verbatim, exclude it from the compress range instead of compressing it.
 - Protected tool outputs — hard-excluded from compression ranges, survive intact in visible context.
 
-HOW TO COMPRESS
-
-When you call compress, the summary you write becomes the only record of the replaced conversation. Make it self-contained and complete: every user request, experiment purpose, and work task in the range must be accurately captured. A later reader (or you, after decompressing) should be able to continue the task WITHOUT needing the original.
-
-KEEP VERBATIM — never paraphrase or abbreviate these:
-- Full file paths with line numbers on every mention (lib/hooks.ts:347, src/index.ts:12-18). Never abbreviate to a bare filename.
-- Function, class, and type signatures (exact names, params, return types) AND critical code lines that encode logic.
-- Error messages and stack traces (exact text — you need the literal string to grep for it later).
-- Decisions and their rationale ("chose X over Y because Z" — the "because" is load-bearing).
-- Constraints discovered ("must support Node 22", "no new dependencies").
-- Exact values: versions, config keys, thresholds, magic numbers.
-- User intent — quote short user messages verbatim.
-- Open questions and unresolved TODOs.
-
-DROP — extract the signal, discard the vessel:
-- Verbose logs (build/test/npm output) once you have captured the error line or the result.
-- Duplicate file reads once the needed content is recorded.
-- Consumed exploration — search hits, agent return values, successful tool outputs.
-- Dead-end exploration — but PRESERVE the lesson in one line: "tried X, failed because Y".
-
-PRIORITY — when the summary must be compact, preserve in this order:
-1. User's overall goal, intent, and hard constraints (losing these changes the task).
-2. Decisions and rationale.
-3. Exact technical artifacts: paths, signatures, errors, values.
-4. Conclusions and key findings.
-5. Lessons learned: what failed and why.
-
-Write dense, scannable bullets — not narrative prose. If the range spans distinct concerns, group bullets under short thematic headers.
+${HOW_TO_COMPRESS_RULES}
 
 MULTI-TIER COMPRESSION
 
 Summaries accumulate as the session grows. When tier-1 summaries pile up, the system injects a nudge prompting you to DISTILL old blocks into a single tier-2 summary. If tier-2 summaries also accumulate, a further nudge asks you to CONDENSE them into tier-3.
 
 To compress blocks: use block IDs as boundaries: compress({ content: [{ startId: "b3", endId: "b15", summary: "..." }] }). This deactivates the consumed blocks and creates a new higher-tier block.
+
+${TIER2_DISTILL_RULES}
+
+${TIER3_CONDENSE_RULES}
 
 THE PHILOSOPHY OF DECOMPRESS
 
