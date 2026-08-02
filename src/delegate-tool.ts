@@ -268,8 +268,11 @@ async function runDelegate(
   const child = spawn("pi", cliArgs, {
     cwd,
     env: childEnv,
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "pipe"],
   }) as ChildProcess;
+  // Pass the task via stdin (not argv) so tasks starting with `-` are not
+  // mis-parsed as CLI options. pi reads piped stdin as the prompt in print mode.
+  child.stdin?.end(args.task);
 
   const stdoutChunks: Buffer[] = [];
   let stderrText = "";
@@ -372,7 +375,6 @@ async function buildChildArgs(
     cliArgs.push("--provider", ctx.model.provider, "--model", ctx.model.id);
   }
 
-  cliArgs.push("--", args.task);
   return { cliArgs, tmpDir };
 }
 
