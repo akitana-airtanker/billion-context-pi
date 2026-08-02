@@ -32,16 +32,18 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
 }
 
 async function handleSearch(args: SearchArgs, runtime: AcpRuntime, ctx: ExtensionContext): Promise<string> {
-    const { state } = await runtime.stateFor(ctx);
-    const docs = buildSearchDocs(ctx, state);
+    const { state, coreMessages } = await runtime.stateFor(ctx);
+    const docs = buildSearchDocs(ctx, state, coreMessages);
+    const msgCount = docs.filter((d) => d.kind === "message").length;
+    const blockCount = docs.filter((d) => d.kind === "block").length;
     const results = searchBlocks(docs, args.query, { limit: args.limit });
 
     if (results.length === 0) {
         const blocks = state.blocks.length;
-        return `No matches for "${args.query}" across ${blocks} block(s) and ${docs.filter((d) => d.kind === "message").length} historical message(s).`;
+        return `No matches for "${args.query}" across ${blocks} block(s) and ${msgCount} historical message(s).`;
     }
 
-    const lines = [`Found ${results.length} match(es) for "${args.query}":`];
+    const lines = [`Found ${results.length} match(es) for "${args.query}" (searched ${blockCount} blocks + ${msgCount} messages):`];
     for (const r of results) lines.push("", formatResult(r));
     return lines.join("\n");
 }

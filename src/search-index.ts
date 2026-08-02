@@ -49,18 +49,23 @@ function toRole(entry: SessionMessageEntry): MessageRole | null {
 /**
  * Build the full searchable document set for one session.
  * Called per searchBlocks invocation. Reads are cheap (in-memory entry tree).
+ *
+ * Visibility check: ACP does NOT write pi `compaction` entries (it prunes
+ * messages itself in processTurn), so pi's buildContextEntries returns ALL
+ * entries. The real visible set is the post-prune coreMessages from stateFor.
  */
-export function buildSearchDocs(ctx: ExtensionContext, state: CompressionState): SearchDoc[] {
+export function buildSearchDocs(
+    ctx: ExtensionContext,
+    state: CompressionState,
+    visibleCoreMessages: { id?: string }[],
+): SearchDoc[] {
     const sm = ctx.sessionManager;
     const allEntries: SessionEntry[] = sm.getEntries();
     const ownerMap = buildMessageOwnerMap(state);
 
-    // which message refs are still visible? buildContextEntries gives the live set.
-    const liveEntries = sm.buildContextEntries();
-    const liveIds = new Set(liveEntries.map((e) => e.id));
-    // also include ids of currently-in-context messages (sub-refs like "id#callId")
-    const coreMsgs = entriesToCoreMessages(liveEntries);
-    for (const m of coreMsgs) if (m.id) liveIds.add(m.id);
+    // Visible = the post-prune messages ACP actually keeps in context.
+    const liveIds = new Set<string>();
+    for (const m of visibleCoreMessages) if (m.id) liveIds.add(m.id);
 
     const blockTier = new Map<string, number>();
     for (const b of state.blocks) blockTier.set(b.blockId, b.tier ?? 1);
