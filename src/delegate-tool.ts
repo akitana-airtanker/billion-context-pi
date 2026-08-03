@@ -129,10 +129,12 @@ Agents (pick by name):
 ${AGENT_NAMES.map(agentListLine).join("\n")}
 
 Behavior:
-• async=true (default): returns immediately with a runId. The delegate runs in the background. In long-lived sessions (interactive/rpc) a short notification (status + file path + preview) is injected back into this chat when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Use acp_delegate_status / acp_delegate_cancel to manage runs. Call acp_delegate again to launch more in parallel.
+• async=true (default): returns immediately with a runId. The delegate runs in the background; you DO NOT need to wait — a completion notification (status + file path) is injected back into this chat automatically when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.
 • async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path plus a short preview. Use the \`read\` tool to open the file for the complete content.
 
-The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small; only a preview is shown inline.`,
+Do NOT poll acp_delegate_status to wait for a single run — the result comes back to you automatically. Use acp_delegate_status only when you have multiple concurrent runs and need to see which finished, and acp_delegate_cancel only to stop a run you no longer want.
+
+The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small.`,
     promptSnippet:
       'acp_delegate({ agent: "reviewer", task: "Review src/index.ts for race conditions" })',
     promptGuidelines: [
@@ -342,8 +344,7 @@ async function runDelegate(
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
       ``,
-      `The full output will be saved to a file; a short notification (path + preview) will be injected here when it finishes. You may continue with other work now, or launch more delegates in parallel.`,
-      `Tip: use acp_delegate_status() to check active runs, acp_delegate_cancel({runId}) to stop one.`,
+      `The full output will be saved to a file, and a completion notification (with the file path) will be injected back here automatically when it finishes. DO NOT poll acp_delegate_status — just continue with other work or launch more delegates in parallel; the result will find you.`,
     ].join("\n");
   }
 
@@ -454,7 +455,7 @@ function injectResult(
     return false;
   }
   const status = code === 0 ? "completed" : "failed";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})`;
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"}) — this is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
   const text = formatPayload(header, file, task);
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
