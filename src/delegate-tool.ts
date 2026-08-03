@@ -74,9 +74,15 @@ interface DelegateRun {
   status: RunStatus;
   exitCode?: number | null;
   child?: ChildProcess;
+  result?: { code: number | null; file: string; body: string };
+  consumed?: boolean;
+  waiter?: () => void;
 }
 
 const runs = new Map<string, DelegateRun>();
+
+const WAIT_TIMEOUT_MS_DEFAULT = 60_000;
+const WAIT_TIMEOUT_MS_MAX = 300_000;
 
 const DelegateParams = Type.Object({
   agent: Type.String({
@@ -100,10 +106,17 @@ const DelegateParams = Type.Object({
 
 type DelegateArgs = Static<typeof DelegateParams>;
 
-const StatusParams = Type.Object({});
-
 const CancelParams = Type.Object({
   runId: Type.String({ description: "The runId returned by acp_delegate to cancel." }),
+});
+
+const WaitParams = Type.Object({
+  runId: Type.String({ description: "The runId returned by acp_delegate to wait for." }),
+  timeout: Type.Optional(
+    Type.Integer({
+      description: `Maximum milliseconds to block waiting for the result. Default ${WAIT_TIMEOUT_MS_DEFAULT} (60s); max ${WAIT_TIMEOUT_MS_MAX} (300s). If the delegate does not finish in time, returns "still running" — stop waiting and a notification will still be injected when it completes.`,
+    }),
+  ),
 });
 
 const agentListLine = (name: string): string => {
@@ -129,10 +142,10 @@ Agents (pick by name):
 ${AGENT_NAMES.map(agentListLine).join("\n")}
 
 Behavior:
-• async=true (default): returns immediately with a runId. The delegate runs in the background; you DO NOT need to wait — a completion notification (status + file path) is injected back into this chat automatically when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.
-• async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path plus a short preview. Use the \`read\` tool to open the file for the complete content.
+• async=true (default): returns immediately with a runId. The delegate runs in the background. Call acp_delegate_wait({ runId }) to block for its result (up to a timeout); if you let the timeout lapse, or never call wait, a short completion notification (status + file path) is still injected into this chat when it finishes. In one-shot sessions (print/json) async auto-downgrades to sync so the result is returned inline within the same turn. Call acp_delegate again to launch more runs in parallel.
+• async=false: blocks until the delegate finishes. The full output is saved to a file; the tool result contains the path. Use the \`read\` tool to open the file for the complete content.
 
-Do NOT poll acp_delegate_status to wait for a single run — the result comes back to you automatically. Use acp_delegate_status only when you have multiple concurrent runs and need to see which finished, and acp_delegate_cancel only to stop a run you no longer want.
+There is NO non-blocking status tool. To get a delegate's result, call acp_delegate_wait with the runId — it blocks until the run finishes or the timeout elapses. Use acp_delegate_cancel only to stop a run you no longer want.
 
 The delegate runs in its own clean pi process — it does NOT see this conversation's context. Give it everything it needs (paths, goals, constraints). Full results always go to a file so the chat context stays small.`,
     promptSnippet:
@@ -152,42 +165,66 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
   };
 }
 
-export function makeDelegateStatusTool(pi: ExtensionAPI): ToolDefinition<typeof StatusParams> {
+function formatRunResult(run: DelegateRun): string {
+  const header =
+    run.status === "completed"
+      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})`
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})`;
+  return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
+}
+
+export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
   return {
-    name: "acp_delegate_status",
-    label: "ACP Delegate Status",
+    name: "acp_delegate_wait",
+    label: "ACP Delegate Wait",
     description:
-      "List active and recently finished background delegates (acp_delegate async runs). Shows runId, agent, status, and elapsed time. Use to check on delegates launched in the background.",
-    promptSnippet: "acp_delegate_status()",
-    promptGuidelines: [],
-    parameters: StatusParams,
-    async execute(): Promise<AgentToolResult<unknown>> {
-      const now = Date.now();
-      const all = Array.from(runs.values()).sort((a, b) => b.startedAt - a.startedAt);
-      const active = all.filter((r) => r.status === "running");
-      const recent = all.filter((r) => r.status !== "running").slice(0, 5);
-      if (all.length === 0) {
-        return { details: undefined, content: [{ type: "text", text: "No delegate runs." }] };
+      "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 60s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and a completion notification is still injected into the chat when it finishes — do not call wait again in a tight loop; either pass a larger timeout or continue other work.",
+    promptSnippet: 'acp_delegate_wait({ runId: "del_..." })',
+    promptGuidelines: [
+      "Use this to fetch a delegate's result instead of polling a status tool.",
+      "If it times out, do NOT retry immediately — raise the timeout or let the background notification reach you.",
+    ],
+    parameters: WaitParams,
+    async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
+      const args = params as { runId: string; timeout?: number };
+      const run = runs.get(args.runId);
+      if (!run) {
+        return { details: undefined, content: [{ type: "text", text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
       }
-      const lines: string[] = [];
-      lines.push(`Active: ${active.length}`);
-      for (const r of active) {
-        const elapsed = Math.round((now - r.startedAt) / 1000);
-        lines.push(
-          `  • ${r.runId} [${r.agent}] running ${elapsed}s — ${truncate(r.task, 80)} (@ ${r.cwd})`,
+      // Already finished (e.g. the model calls wait after the injected notification).
+      if (run.status !== "running") {
+        run.consumed = true;
+        return { details: undefined, content: [{ type: "text", text: formatRunResult(run) }] };
+      }
+      const timeoutMs = Math.min(
+        Math.max(args.timeout ?? WAIT_TIMEOUT_MS_DEFAULT, 1_000),
+        WAIT_TIMEOUT_MS_MAX,
+      );
+      // Park a waiter; the close handler resolves it (and the result is owned
+      // by this tool, so no injection duplicates it).
+      return new Promise((resolve) => {
+        let settled = false;
+        const finish = (text: string) => {
+          if (settled) return;
+          settled = true;
+          run.waiter = undefined;
+          signal?.removeEventListener("abort", onAbort);
+          resolve({ details: undefined, content: [{ type: "text", text }] });
+        };
+        const onAbort = () => {
+          run.consumed = false; // still inject later
+          finish(`Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.`);
+        };
+        run.waiter = () => {
+          run.consumed = true; // we own the result; suppress injection
+          finish(formatRunResult(run));
+        };
+        signal?.addEventListener("abort", onAbort);
+        setTimeout(
+          () => finish(`Delegate \`${args.runId}\` is still running after ${Math.round(timeoutMs / 1000)}s — stop waiting. A completion notification (with the result file path) will be injected into the chat when it finishes; meanwhile you may continue other work.`),
+          timeoutMs,
         );
-      }
-      if (recent.length > 0) {
-        lines.push("");
-        lines.push("Recent (last 5):");
-        for (const r of recent) {
-          const dur = r.finishedAt ? Math.round((r.finishedAt - r.startedAt) / 1000) : 0;
-          lines.push(
-            `  • ${r.runId} [${r.agent}] ${r.status} (exit ${r.exitCode ?? "?"}, ${dur}s) — ${truncate(r.task, 60)}`,
-          );
-        }
-      }
-      return { details: undefined, content: [{ type: "text", text: lines.join("\n") }] };
+      });
     },
   };
 }
@@ -207,7 +244,7 @@ export function makeDelegateCancelTool(pi: ExtensionAPI): ToolDefinition<typeof 
       if (!run) {
         return {
           details: undefined,
-          content: [{ type: "text", text: `Unknown runId "${runId}". Use acp_delegate_status to list runs.` }],
+          content: [{ type: "text", text: `Unknown runId "${runId}".` }],
         };
       }
       if (run.status !== "running") {
@@ -217,6 +254,7 @@ export function makeDelegateCancelTool(pi: ExtensionAPI): ToolDefinition<typeof 
         };
       }
       run.status = "cancelled";
+      run.consumed = true; // suppress injection; the waiter (if any) gets cancelled status
       try {
         run.child?.kill("SIGTERM");
       } catch (err) {
@@ -318,10 +356,24 @@ async function runDelegate(
       // N2: don't inject a (misleading "failed") notification for cancelled runs.
       if (run.status === "cancelled") {
         debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
+        run.waiter?.();
         return;
       }
       void persistResult(runId, body)
         .then((file) => {
+          run.result = { code, file, body };
+          // If a wait is parked on this run, wake it — it owns the result now
+          // (and marks consumed so we don't double-deliver by injecting).
+          if (run.waiter) {
+            debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
+            run.waiter();
+            return;
+          }
+          // If a wait already returned this result, skip the injection.
+          if (run.consumed) {
+            debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
+            return;
+          }
           const injected = injectResult(pi, args.agent, runId, args.task, code, file);
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
         })
@@ -344,7 +396,7 @@ async function runDelegate(
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
       ``,
-      `The full output will be saved to a file, and a completion notification (with the file path) will be injected back here automatically when it finishes. DO NOT poll acp_delegate_status — just continue with other work or launch more delegates in parallel; the result will find you.`,
+      `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 60s timeout; pass a larger \`timeout\` for long tasks). If you don't, or the wait times out, a completion notification (with the result file path) is still injected here automatically when it finishes — so you may also continue other work now and let the result find you.`,
     ].join("\n");
   }
 

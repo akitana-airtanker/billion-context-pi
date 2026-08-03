@@ -101,6 +101,7 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
   // injected delegate results as system notifications, not user messages)
   assert.ok(sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate notification section present");
   assert.ok(/NOT .*(user message|user request)/i.test(sp), "delegates marked as not-user-message");
+  assert.ok(/no status tool|NO .?status tool|only way.*acp_delegate_wait/i.test(sp), "wait replaces status tool");
   // marker system removed entirely from kernel constants
   assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
   assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");

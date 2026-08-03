@@ -70,7 +70,7 @@ Pi 内置的自动压缩会被取消 —— ACP 是唯一的上下文管理者�
 | `search_context` | 按关键词搜索已压缩块摘要(及可见消息) |
 | `acp_status` | 显示上下文用量、已压缩块、可压缩范围 |
 | `acp_delegate` | 为某个任务派生一个干净上下文的子代理(审查 / 调研 / 实现 / 规划 / 建议) |
-| `acp_delegate_status` | 列出活跃和近期的委派任务 |
+| `acp_delegate_wait` | 阻塞等待委派任务完成(返回结果,否则超时) |
 | `acp_delegate_cancel` | 按 runId 取消正在运行的委派任务 |
 
 ### acp_delegate — 干净上下文委派

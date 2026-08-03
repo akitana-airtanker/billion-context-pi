@@ -12,7 +12,7 @@ import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateStatusTool, makeDelegateCancelTool } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
@@ -39,7 +39,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     // so it receives `pi` directly rather than the AcpRuntime. Kept in pai-acp
     // for single-plugin simplicity; isolated in its own module for cleanliness.
     pi.registerTool(makeDelegateTool(pi));
-    pi.registerTool(makeDelegateStatusTool(pi));
+    pi.registerTool(makeDelegateWaitTool(pi));
     pi.registerTool(makeDelegateCancelTool(pi));
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
