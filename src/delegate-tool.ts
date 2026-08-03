@@ -81,7 +81,7 @@ interface DelegateRun {
 
 const runs = new Map<string, DelegateRun>();
 
-const WAIT_TIMEOUT_MS_DEFAULT = 60_000;
+const WAIT_TIMEOUT_MS_DEFAULT = 10_000;
 const WAIT_TIMEOUT_MS_MAX = 300_000;
 
 const DelegateParams = Type.Object({
@@ -114,7 +114,7 @@ const WaitParams = Type.Object({
   runId: Type.String({ description: "The runId returned by acp_delegate to wait for." }),
   timeout: Type.Optional(
     Type.Integer({
-      description: `Maximum milliseconds to block waiting for the result. Default ${WAIT_TIMEOUT_MS_DEFAULT} (60s); max ${WAIT_TIMEOUT_MS_MAX} (300s). If the delegate does not finish in time, returns "still running" — stop waiting and a notification will still be injected when it completes.`,
+      description: `Maximum milliseconds to block waiting for the result. Default ${WAIT_TIMEOUT_MS_DEFAULT} (10s); max ${WAIT_TIMEOUT_MS_MAX} (300s). If the delegate does not finish in time, returns "failed (not ready)" — do NOT keep waiting or retry; go do other work, and a completion notification will still be injected when it completes.`,
     }),
   ),
 });
@@ -178,11 +178,11 @@ export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof Wa
     name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
     description:
-      "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 60s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and a completion notification is still injected into the chat when it finishes — do not call wait again in a tight loop; either pass a larger timeout or continue other work.",
+      "Block until an acp_delegate async run finishes, then return its result (status + file path). This is the ONLY way to fetch a delegate's result — there is no non-blocking status tool, so you cannot poll. Default timeout is 10s (max 300s). If the delegate finishes within the timeout, its result is returned here (same format as a sync delegate). If it times out, the run keeps going in the background and you should STOP waiting — do not retry in a loop; go do other work, and a completion notification will still be injected into the chat when it finishes.",
     promptSnippet: 'acp_delegate_wait({ runId: "del_..." })',
     promptGuidelines: [
       "Use this to fetch a delegate's result instead of polling a status tool.",
-      "If it times out, do NOT retry immediately — raise the timeout or let the background notification reach you.",
+      "If it times out, do NOT retry — go do other work and let the background notification reach you.",
     ],
     parameters: WaitParams,
     async execute(_toolCallId, params, signal): Promise<AgentToolResult<unknown>> {
@@ -221,7 +221,7 @@ export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof Wa
         };
         signal?.addEventListener("abort", onAbort);
         setTimeout(
-          () => finish(`Delegate \`${args.runId}\` is still running after ${Math.round(timeoutMs / 1000)}s — stop waiting. A completion notification (with the result file path) will be injected into the chat when it finishes; meanwhile you may continue other work.`),
+          () => finish(`Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.`),
           timeoutMs,
         );
       });
@@ -396,7 +396,7 @@ async function runDelegate(
       `Task: ${truncate(args.task, 160)}`,
       `Running in the background at \`${cwd}\`.`,
       ``,
-      `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 60s timeout; pass a larger \`timeout\` for long tasks). If you don't, or the wait times out, a completion notification (with the result file path) is still injected here automatically when it finishes — so you may also continue other work now and let the result find you.`,
+      `Call acp_delegate_wait({ runId: "${runId}" }) to block for the result (default 10s timeout). If the wait times out, or you skip it, a completion notification (with the result file path) is still injected here automatically when the delegate finishes — so you may also just continue other work now and let the result find you.`,
     ].join("\n");
   }
 
