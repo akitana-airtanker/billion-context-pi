@@ -98,7 +98,7 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
       execFile(
         "npm",
         ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
-        { cwd: npmDir, timeout: 60_000 },
+        { cwd: npmDir, timeout: 60_000, shell: process.platform === "win32" },
         (err) => resolve(err ? 1 : 0),
       );
     });

@@ -268,6 +268,7 @@ async function runDelegate(
     cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],
+    shell: process.platform === "win32",
   }) as ChildProcess;
   // Pass the task via stdin (not argv) so tasks starting with `-` are not
   // mis-parsed as CLI options. pi reads piped stdin as the prompt in print mode.
