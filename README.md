@@ -71,7 +71,7 @@ Pi's built-in auto-compaction is cancelled — ACP is the sole context manager.
 | `search_context` | Search compressed block summaries (and visible messages) by keyword |
 | `acp_status` | Show context usage, compressed blocks, compressible ranges |
 | `acp_delegate` | Spawn a clean-context sub-agent for a task (review / research / implement / plan / advise) |
-| `acp_delegate_status` | List active and recent delegate runs |
+| `acp_delegate_wait` | Block until a delegate run finishes (returns its result; times out otherwise) |
 | `acp_delegate_cancel` | Cancel a running delegate by runId |
 
 ### acp_delegate — clean-context delegation
