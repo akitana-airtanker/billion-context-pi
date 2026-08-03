@@ -173,7 +173,7 @@ function formatRunResult(run: DelegateRun): string {
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
 }
 
-export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
+export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
   return {
     name: "acp_delegate_wait",
     label: "ACP Delegate Wait",
@@ -191,28 +191,44 @@ export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof Wa
       if (!run) {
         return { details: undefined, content: [{ type: "text", text: `No delegate run with runId \`${args.runId}\`. It may have already been reported or never existed.` }] };
       }
-      // Already finished (e.g. the model calls wait after the injected notification).
-      if (run.status !== "running") {
+      // Already finished (e.g. the model calls wait after the injected
+      // notification, or the run was cancelled).
+      if (run.status === "cancelled") {
         run.consumed = true;
+        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).` }] };
+      }
+      if (run.status !== "running") {
+        // status is only flipped together with result (see close handler), so
+        // a non-running, non-cancelled run always has a result. Guard anyway.
+        run.consumed = true;
+        if (!run.result) {
+          return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` finished but no result is available (persist error).` }] };
+        }
         return { details: undefined, content: [{ type: "text", text: formatRunResult(run) }] };
       }
       const timeoutMs = Math.min(
         Math.max(args.timeout ?? WAIT_TIMEOUT_MS_DEFAULT, 1_000),
         WAIT_TIMEOUT_MS_MAX,
       );
+      // Refuse to park a second waiter on the same run: a second wait would
+      // overwrite run.waiter and orphan the first wait's listener/timer.
+      if (run.waiter) {
+        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` already has a wait in progress; do not wait on it twice.` }] };
+      }
       // Park a waiter; the close handler resolves it (and the result is owned
       // by this tool, so no injection duplicates it).
       return new Promise((resolve) => {
         let settled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
         const finish = (text: string) => {
           if (settled) return;
           settled = true;
           run.waiter = undefined;
+          if (timer) clearTimeout(timer);
           signal?.removeEventListener("abort", onAbort);
           resolve({ details: undefined, content: [{ type: "text", text }] });
         };
         const onAbort = () => {
-          run.consumed = false; // still inject later
           finish(`Aborted; delegate \`${args.runId}\` is still running in the background. A notification will be injected when it finishes.`);
         };
         run.waiter = () => {
@@ -220,7 +236,7 @@ export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof Wa
           finish(formatRunResult(run));
         };
         signal?.addEventListener("abort", onAbort);
-        setTimeout(
+        timer = setTimeout(
           () => finish(`Failed: delegate \`${args.runId}\` result not ready after ${Math.round(timeoutMs / 1000)}s. Do NOT keep waiting or retry — go do other work now. The run continues in the background and a completion notification (with the result file path) will be injected into the chat when it finishes.`),
           timeoutMs,
         );
@@ -229,7 +245,7 @@ export function makeDelegateWaitTool(pi: ExtensionAPI): ToolDefinition<typeof Wa
   };
 }
 
-export function makeDelegateCancelTool(pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
+export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof CancelParams> {
   return {
     name: "acp_delegate_cancel",
     label: "ACP Delegate Cancel",
@@ -349,19 +365,25 @@ async function runDelegate(
     child.on("close", (code) => {
       void cleanupTmp(tmpDir);
       const output = Buffer.concat(stdoutChunks).toString("utf8").trim();
-      run.status = run.status === "cancelled" ? "cancelled" : code === 0 ? "completed" : "failed";
-      run.finishedAt = Date.now();
       run.exitCode = code;
       const body = code === 0 ? (output || "(no output)") : (stderrText.trim() || output || "(no output)");
-      // N2: don't inject a (misleading "failed") notification for cancelled runs.
+      // N2: cancelled runs never persist a result — wake a parked waiter (if any)
+      // and stop. status stays "cancelled" (set by cancel), so wait cannot
+      // mistake it for a finished-with-result run.
       if (run.status === "cancelled") {
+        run.finishedAt = Date.now();
         debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
         run.waiter?.();
         return;
       }
       void persistResult(runId, body)
         .then((file) => {
+          // Atomically flip status + result together: until this point the run
+          // is still "running" to any observer, so a concurrent wait cannot
+          // see "finished but result missing".
           run.result = { code, file, body };
+          run.status = code === 0 ? "completed" : "failed";
+          run.finishedAt = Date.now();
           // If a wait is parked on this run, wake it — it owns the result now
           // (and marks consumed so we don't double-deliver by injecting).
           if (run.waiter) {
@@ -378,14 +400,26 @@ async function runDelegate(
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
         })
         .catch((err) => {
+          // Persist failed — still need to finalize so a waiter doesn't hang.
+          run.status = "failed";
+          run.finishedAt = Date.now();
           debug.event("delegate-done-error", { runId, error: String(err) });
+          run.waiter?.();
         });
     });
     child.on("error", (err) => {
       void cleanupTmp(tmpDir);
-      run.status = "failed";
-      run.finishedAt = Date.now();
-      debug.event("delegate-spawn-error", { runId, error: String(err) });
+      // Spawn-level error (e.g. EPIPE on a fast-exiting child, ENOENT).
+      // Node does not guarantee a follow-up close, so finalize here too:
+      // atomically set status + a synthetic result, and wake a parked waiter.
+      // The settled guard in close (if it does fire) prevents double-finalize.
+      if (run.status === "running" || run.status === "cancelled") {
+        run.status = run.status === "cancelled" ? "cancelled" : "failed";
+        run.finishedAt = Date.now();
+        run.result = { code: null, file: "", body: `spawn error: ${String(err)}` };
+        debug.event("delegate-spawn-error", { runId, error: String(err) });
+        run.waiter?.();
+      }
     });
     // Detach so the child survives the tool returning. Injection is best-effort:
     // the close handler calls sendUserMessage (fire-and-forget) to notify the
