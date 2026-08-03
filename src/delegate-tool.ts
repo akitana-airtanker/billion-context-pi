@@ -166,10 +166,15 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
 }
 
 function formatRunResult(run: DelegateRun): string {
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" && r.runId !== run.runId).length;
+  const remainingLine =
+    remaining > 0
+      ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.`
+      : "";
   const header =
     run.status === "completed"
-      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})`
-      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})`;
+      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${remainingLine}`
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${remainingLine}`;
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
 }
 
@@ -541,7 +546,17 @@ function injectResult(
     return false;
   }
   const status = code === 0 ? "completed" : "failed";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"}) — this is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
+  // Tell the model how many other delegates are still running, so it doesn't
+  // lose count when many were dispatched in a batch (e.g. launched 5, this is
+  // the 2nd to return → "3 still running" → the model knows to keep waiting).
+  // The current run is already non-running (status flipped just before this),
+  // so counting status==="running" gives exactly the remaining ones.
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running").length;
+  const remainingLine =
+    remaining > 0
+      ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
+      : " No delegates are currently running.";
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${remainingLine} This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
   const text = formatPayload(header, file, task);
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
