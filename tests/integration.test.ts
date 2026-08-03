@@ -97,6 +97,10 @@ test("system prompt sources compression rules from acp-kernel (no hardcoded drif
   assert.ok(sp.includes("HOW TO COMPRESS"), "kernel HOW_TO_COMPRESS_RULES inlined");
   assert.ok(sp.includes("TIER 2 COMPRESSION"), "kernel TIER2_DISTILL_RULES inlined");
   assert.ok(sp.includes("TIER 3 COMPRESSION"), "kernel TIER3_CONDENSE_RULES inlined");
+  // acp_delegate notification education present (models must learn to treat
+  // injected delegate results as system notifications, not user messages)
+  assert.ok(sp.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate notification section present");
+  assert.ok(/NOT .*(user message|user request)/i.test(sp), "delegates marked as not-user-message");
   // marker system removed entirely from kernel constants
   assert.ok(!sp.includes("[[KEEP:"), "no KEEP marker teaching");
   assert.ok(!sp.includes("[[REF:"), "no REF marker teaching");
