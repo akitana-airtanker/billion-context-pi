@@ -11,6 +11,7 @@ export interface UserAcpConfig {
   debug?: boolean;
   autoUpdate?: boolean;
   modelContextLimit?: number;
+  delegate?: boolean;
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -38,7 +39,7 @@ function join(... parts: string[]): string {
   return path.join(...parts);
 }
 
-const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit"]);
+const KNOWN = new Set(["debug", "autoUpdate", "modelContextLimit", "delegate"]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
   const out: UserAcpConfig = {};

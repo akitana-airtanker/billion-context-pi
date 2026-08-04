@@ -15,7 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
-import { ACP_SYSTEM_PROMPT } from "./system-prompt.js";
+import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { debug, setDebugEnabled } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
@@ -30,17 +30,11 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireCompactionDisable(pi);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
-    wireSystemPrompt(pi);
+    wireSystemPrompt(pi, runtime);
     pi.registerTool(makeCompressTool(runtime));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
-    // acp_delegate is independent of the ACP runtime (it only uses pi APIs),
-    // so it receives `pi` directly rather than the AcpRuntime. Kept in pai-acp
-    // for single-plugin simplicity; isolated in its own module for cleanliness.
-    pi.registerTool(makeDelegateTool(pi));
-    pi.registerTool(makeDelegateWaitTool(pi));
-    pi.registerTool(makeDelegateCancelTool(pi));
     for (const { name, options } of makeCommands(runtime)) {
       pi.registerCommand(name, options);
     }
@@ -72,6 +66,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
     } catch {
       // best-effort — fall back to factory/env config
+    }
+    if (runtime.adapter.delegate !== false) {
+      pi.registerTool(makeDelegateTool(pi));
+      pi.registerTool(makeDelegateWaitTool(pi));
+      pi.registerTool(makeDelegateCancelTool(pi));
     }
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
@@ -189,10 +188,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
 }
 
-function wireSystemPrompt(pi: ExtensionAPI): void {
-  pi.on("before_agent_start", (event) => ({
-    systemPrompt: `${event.systemPrompt}\n\n${ACP_SYSTEM_PROMPT}`,
-  }));
+function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("before_agent_start", (event) => {
+    const delegate = runtime.adapter.delegate !== false;
+    const prompt = delegate ? `${ACP_SYSTEM_PROMPT}\n${ACP_DELEGATE_PROMPT}` : ACP_SYSTEM_PROMPT;
+    return { systemPrompt: `${event.systemPrompt}\n\n${prompt}` };
+  });
 }
 
 function collectOriginals(entries: ReturnType<ExtensionContext["sessionManager"]["buildContextEntries"]>): Map<string, AgentMessage> {

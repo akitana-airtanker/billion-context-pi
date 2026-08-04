@@ -17,6 +17,10 @@ export interface AdapterConfig {
   /** Write ACP debug events to the debug log file (default ~/.pi/acp-debug.log).
    *  Default: false (or env ACP_DEBUG=1/true). */
   debug?: boolean;
+  /** Enable acp_delegate tools (delegate/wait/cancel) and their system-prompt
+   *  section. Default: true. Set `delegate: false` (adapter config or
+   *  ~/.pi/acp.json) to skip registering them. */
+  delegate?: boolean;
   coreOverrides?: Partial<Config>;
 }
 
