@@ -6,6 +6,7 @@ import { mkdir, mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Type, type Static } from "typebox";
+import { delegateStatusWidget } from "./fleet-widget.js";
 import type {
   AgentToolResult,
   ExtensionAPI,
@@ -80,6 +81,15 @@ interface DelegateRun {
 }
 
 const runs = new Map<string, DelegateRun>();
+
+/** Snapshot of currently-running delegate runs, for the TUI status widget. */
+export function runningRunsSnapshot(): { runId: string; agent: string; task: string; startedAt: number }[] {
+  const out: { runId: string; agent: string; task: string; startedAt: number }[] = [];
+  for (const r of runs.values()) {
+    if (r.status === "running") out.push({ runId: r.runId, agent: r.agent, task: r.task, startedAt: r.startedAt });
+  }
+  return out;
+}
 
 const WAIT_TIMEOUT_MS_DEFAULT = 10_000;
 const WAIT_TIMEOUT_MS_MAX = 300_000;
@@ -289,6 +299,7 @@ export function makeDelegateCancelTool(_pi: ExtensionAPI): ToolDefinition<typeof
       } catch (err) {
         debug.event("delegate-cancel-kill-error", { runId, error: String(err) });
       }
+      delegateStatusWidget.poke();
       return {
         details: undefined,
         content: [{ type: "text", text: `Cancelled ${runId} (${run.agent}).` }],
@@ -374,6 +385,7 @@ async function runDelegate(
       child,
     };
     runs.set(runId, run);
+    delegateStatusWidget.poke();
 
     child.on("close", (code) => {
       void cleanupTmp(tmpDir);
@@ -387,6 +399,7 @@ async function runDelegate(
         run.finishedAt = Date.now();
         debug.event("delegate-done", { runId, code, status: run.status, injected: false, outLen: output.length });
         run.waiter?.();
+        delegateStatusWidget.poke();
         return;
       }
       void persistResult(runId, body)
@@ -402,15 +415,18 @@ async function runDelegate(
           if (run.waiter) {
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "wait", outLen: output.length, file });
             run.waiter();
+            delegateStatusWidget.poke();
             return;
           }
           // If a wait already returned this result, skip the injection.
           if (run.consumed) {
             debug.event("delegate-done", { runId, code, status: run.status, injected: false, via: "consumed", outLen: output.length, file });
+            delegateStatusWidget.poke();
             return;
           }
           const injected = injectResult(pi, args.agent, runId, args.task, code, file);
           debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
+          delegateStatusWidget.poke();
         })
         .catch((err) => {
           // Persist failed — still need to finalize so a waiter doesn't hang.
@@ -418,6 +434,7 @@ async function runDelegate(
           run.finishedAt = Date.now();
           debug.event("delegate-done-error", { runId, error: String(err) });
           run.waiter?.();
+          delegateStatusWidget.poke();
         });
     });
     child.on("error", (err) => {
