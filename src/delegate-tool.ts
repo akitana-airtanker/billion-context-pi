@@ -449,6 +449,7 @@ async function runDelegate(
         run.result = { code: null, file: "", body: `spawn error: ${String(err)}` };
         debug.event("delegate-spawn-error", { runId, error: String(err) });
         run.waiter?.();
+        delegateStatusWidget.poke();
       }
     });
     // Detach so the child survives the tool returning. Injection is best-effort:

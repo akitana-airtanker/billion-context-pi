@@ -14,15 +14,9 @@ interface WidgetRun {
 type RunsSnapshot = () => WidgetRun[];
 
 let ui: ExtensionContext["ui"] | undefined;
-let ctxMode: string | undefined;
 let timer: ReturnType<typeof setInterval> | undefined;
 let lastRenderKey = "";
 let runsSnapshot: RunsSnapshot | undefined;
-
-function isStaleExtensionContextError(err: unknown): boolean {
-  const msg = err instanceof Error ? err.message : String(err);
-  return /stale|no longer active/i.test(msg);
-}
 
 function truncateTask(task: string): string {
   const oneLine = task.replace(/\n/g, " ").trim();
@@ -43,42 +37,69 @@ function renderLines(runs: WidgetRun[]): string[] | undefined {
   return [header, ...rows];
 }
 
+function renderKeyFor(runs: WidgetRun[]): string {
+  return runs
+    .map((r) => `${r.agent}:${Math.round((Date.now() - r.startedAt) / 1000)}:${truncateTask(r.task)}`)
+    .join("|");
+}
+
+function stopTimer(): void {
+  if (timer) {
+    clearInterval(timer);
+    timer = undefined;
+  }
+}
+
+function clearWidget(): void {
+  if (!ui) return;
+  try {
+    ui.setWidget(DELEGATE_WIDGET_KEY, undefined);
+  } catch {
+    // session is tearing down — best effort
+  }
+}
+
 function refresh(): void {
   if (!ui) return;
   const runs = runsSnapshot ? runsSnapshot() : [];
+  if (runs.length === 0) {
+    // Empty list: clear the widget and stop the timer so an idle TUI does not
+    // tick forever. The next poke() (on a new spawn) restarts it.
+    if (lastRenderKey !== "") {
+      lastRenderKey = "";
+      clearWidget();
+    }
+    stopTimer();
+    return;
+  }
   const sorted = [...runs].sort((a, b) => a.startedAt - b.startedAt);
   // Debounce: skip re-render if the visible state (agent + elapsed-second +
-  // count) hasn't changed since last render. Elapsed is rounded to seconds, so
-  // this naturally re-renders ~once per second per run.
-  const renderKey = sorted
-    .map((r) => `${r.agent}:${Math.round((Date.now() - r.startedAt) / 1000)}:${r.task.slice(0, MAX_TASK_LEN)}`)
-    .join("|");
+  // count + task) hasn't changed since last render. Elapsed is rounded to
+  // seconds, so this naturally re-renders ~once per second per run.
+  const renderKey = renderKeyFor(sorted);
   if (renderKey === lastRenderKey) return;
   lastRenderKey = renderKey;
   const lines = renderLines(sorted);
   try {
     ui.setWidget(DELEGATE_WIDGET_KEY, lines, { placement: "belowEditor" });
-  } catch (err) {
-    if (isStaleExtensionContextError(err)) {
-      // The ctx we cached went stale (e.g. /reload). Drop it; the next
-      // session_start / tool_result will rebind a fresh one.
-      ui = undefined;
-      ctxMode = undefined;
-      if (timer) {
-        clearInterval(timer);
-        timer = undefined;
-      }
-    }
+  } catch {
+    // Real teardown goes through dispose() (session_shutdown). setWidget does
+    // not throw "stale" — if it ever throws here, best effort is to clear ui
+    // so the next setContext rebinds.
+    ui = undefined;
+    stopTimer();
   }
 }
 
 export const delegateStatusWidget = {
   setContext(ctx: ExtensionContext, snapshot: RunsSnapshot): void {
-    // Only the interactive TUI renders widgets; rpc/json/print have no use for
-    // them (and calling setWidget there is a no-op or error).
-    if (!ctx.hasUI) return;
+    // Only the interactive TUI renders widgets. RPC mode has hasUI === true but
+    // its setWidget just emits extension_ui_request notifications to an RPC
+    // client — useless here and a needless ~1Hz chatter. print/json have
+    // hasUI === false. Guard on the mode directly (types.d.ts: "Use \"tui\" to
+    // guard terminal-only UI").
+    if (ctx.mode !== "tui") return;
     ui = ctx.ui;
-    ctxMode = ctx.mode;
     runsSnapshot = snapshot;
     if (!timer) {
       timer = setInterval(refresh, REFRESH_MS);
@@ -87,22 +108,18 @@ export const delegateStatusWidget = {
     refresh();
   },
   dispose(): void {
-    if (timer) {
-      clearInterval(timer);
-      timer = undefined;
-    }
-    if (ui) {
-      try {
-        ui.setWidget(DELEGATE_WIDGET_KEY, undefined);
-      } catch {
-        // session is tearing down — best effort
-      }
-    }
+    stopTimer();
+    clearWidget();
     ui = undefined;
-    ctxMode = undefined;
     lastRenderKey = "";
   },
   poke(): void {
+    // A new spawn may arrive after refresh() stopped the timer on an empty
+    // list. Restart it so the widget updates.
+    if (ui && !timer) {
+      timer = setInterval(refresh, REFRESH_MS);
+      timer.unref?.();
+    }
     refresh();
   },
 };
