@@ -126,3 +126,12 @@ test("context handler persists state so a second call is idempotent on the same 
   const tag2 = ((second.messages[0] as any).content as any[]).find((b: any) => b.type === "text" && b.text.startsWith("[m"));
   assert.equal(tag1?.text, tag2?.text, "refs stable across calls (loaded from persisted state)");
 });
+
+test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the system prompt", () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ delegate: false })(api as any);
+  const result = handlers.get("before_agent_start")![0]!({ systemPrompt: "" }, {});
+  assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
+  // Core ACP prompt is still present — only the delegate section is dropped.
+  assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
