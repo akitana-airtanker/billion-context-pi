@@ -129,7 +129,8 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 {
   "debug": false,
   "autoUpdate": true,
-  "modelContextLimit": 200000
+  "modelContextLimit": 200000,
+  "delegate": true
 }
 ```
 
@@ -138,8 +139,9 @@ Create `~/.pi/acp.json` (global) and/or `<project>/.pi/acp.json` (project-local,
 | `debug` | `false` | Write diagnostic events to `~/.pi/acp-debug.log`. Also enabled by env `ACP_DEBUG=1`. |
 | `autoUpdate` | `true` | On Pi startup, check npm for a newer version and auto-install it (throttled to one check per 3 minutes). Disable to avoid all startup network calls. |
 | `modelContextLimit` | *(auto)* | Override the context limit (in tokens). Defaults to the model's `contextWindow`. |
+| `delegate` | `true` | Enable the `acp_delegate` tools (delegate/wait/cancel) and their system-prompt section. Set `false` to skip registering them (e.g. you use a different sub-agent extension, or run headless where async injection adds no value). |
 
-> **Only these three keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
+> **Only these four keys are read from `acp.json`.** Other tuning knobs (`preserveRecentMessages`, `protectedTools`, nudge thresholds) are code-level and not user-overridable.
 
 ### Environment variables
 

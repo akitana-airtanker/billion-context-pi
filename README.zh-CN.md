@@ -128,7 +128,8 @@ pai-acp 开箱即用,无需任何配置。可以在 JSON 配置文件中设置�
 {
   "debug": false,
   "autoUpdate": true,
-  "modelContextLimit": 200000
+  "modelContextLimit": 200000,
+  "delegate": true
 }
 ```
 
@@ -137,8 +138,9 @@ pai-acp 开箱即用,无需任何配置。可以在 JSON 配置文件中设置�
 | `debug` | `false` | 将诊断事件写入 `~/.pi/acp-debug.log`。也可用环境变量 `ACP_DEBUG=1` 启用。 |
 | `autoUpdate` | `true` | Pi 启动时检查 npm 是否有更新版本并自动安装(限频:每 3 分钟最多一次检查)。禁用以避免所有启动时的网络请求。 |
 | `modelContextLimit` | *(自动)* | 覆盖上下文上限(token 数)。默认为模型的 `contextWindow`。 |
+| `delegate` | `true` | 启用 `acp_delegate` 工具(delegate/wait/cancel)及其系统提示词段落。设为 `false` 则不注册这些工具(例如你用了别的子代理扩展,或跑 headless 场景异步注入没有意义)。 |
 
-> **只有这三个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`、nudge 阈值)是代码级的,不向用户开放。
+> **只有这四个 key 会被 `acp.json` 读取。** 其他调优参数(`preserveRecentMessages`、`protectedTools`、nudge 阈值)是代码级的,不向用户开放。
 
 ### 环境变量
 
