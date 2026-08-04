@@ -166,16 +166,17 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
 }
 
 function formatRunResult(run: DelegateRun): string {
-  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" && r.runId !== run.runId).length;
-  const remainingLine =
-    remaining > 0
-      ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.`
-      : "";
   const header =
     run.status === "completed"
-      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${remainingLine}`
-      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${remainingLine}`;
+      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`;
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
+}
+
+/** Count of OTHER delegates still running (excludes self), for wait-path results. */
+function remainingLineForWait(selfRunId: string): string {
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" && r.runId !== selfRunId).length;
+  return remaining > 0 ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.` : "";
 }
 
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
@@ -200,7 +201,7 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       // notification, or the run was cancelled).
       if (run.status === "cancelled") {
         run.consumed = true;
-        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).` }] };
+        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}` }] };
       }
       if (run.status !== "running") {
         // status is only flipped together with result (see close handler), so
@@ -238,6 +239,13 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
         };
         run.waiter = () => {
           run.consumed = true; // we own the result; suppress injection
+          if (run.status === "cancelled") {
+            // Same message as the cancel-then-wait early-return path, for consistency.
+            // Don't go through formatRunResult — cancelled runs have no result, and
+            // formatPayload would render a misleading "could not be persisted" line.
+            finish(`Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`);
+            return;
+          }
           finish(formatRunResult(run));
         };
         signal?.addEventListener("abort", onAbort);
