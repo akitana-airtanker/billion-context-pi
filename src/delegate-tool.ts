@@ -168,9 +168,15 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
 function formatRunResult(run: DelegateRun): string {
   const header =
     run.status === "completed"
-      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})`
-      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})`;
+      ? `Delegate **${run.agent}** (runId \`${run.runId}\`) completed (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`
+      : `Delegate **${run.agent}** (runId \`${run.runId}\`) ${run.status} (exit ${run.exitCode ?? "?"})${remainingLineForWait(run.runId)}`;
   return formatPayload(header, run.result?.file ?? "", run.task, run.result?.body);
+}
+
+/** Count of OTHER delegates still running (excludes self), for wait-path results. */
+function remainingLineForWait(selfRunId: string): string {
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running" && r.runId !== selfRunId).length;
+  return remaining > 0 ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running.` : "";
 }
 
 export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof WaitParams> {
@@ -195,7 +201,7 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
       // notification, or the run was cancelled).
       if (run.status === "cancelled") {
         run.consumed = true;
-        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).` }] };
+        return { details: undefined, content: [{ type: "text", text: `Delegate \`${args.runId}\` was cancelled (no result).${remainingLineForWait(args.runId)}` }] };
       }
       if (run.status !== "running") {
         // status is only flipped together with result (see close handler), so
@@ -233,6 +239,13 @@ export function makeDelegateWaitTool(_pi: ExtensionAPI): ToolDefinition<typeof W
         };
         run.waiter = () => {
           run.consumed = true; // we own the result; suppress injection
+          if (run.status === "cancelled") {
+            // Same message as the cancel-then-wait early-return path, for consistency.
+            // Don't go through formatRunResult — cancelled runs have no result, and
+            // formatPayload would render a misleading "could not be persisted" line.
+            finish(`Delegate \`${run.runId}\` was cancelled (no result).${remainingLineForWait(run.runId)}`);
+            return;
+          }
           finish(formatRunResult(run));
         };
         signal?.addEventListener("abort", onAbort);
@@ -541,7 +554,17 @@ function injectResult(
     return false;
   }
   const status = code === 0 ? "completed" : "failed";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"}) — this is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
+  // Tell the model how many other delegates are still running, so it doesn't
+  // lose count when many were dispatched in a batch (e.g. launched 5, this is
+  // the 2nd to return → "3 still running" → the model knows to keep waiting).
+  // The current run is already non-running (status flipped just before this),
+  // so counting status==="running" gives exactly the remaining ones.
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running").length;
+  const remainingLine =
+    remaining > 0
+      ? ` ${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
+      : " No delegates are currently running.";
+  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${remainingLine} This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.`;
   const text = formatPayload(header, file, task);
   try {
     // sendUserMessage is fire-and-forget (returns void): it enqueues a
