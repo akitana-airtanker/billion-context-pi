@@ -102,8 +102,8 @@ function runPi(args: string[]): Promise<number> {
     const child = execFile(
       process.execPath,
       [cliEntry, ...args],
-      { timeout: 120_000, shell: false },
-      (err: NodeJS.ErrnoException | null) => resolve(err ? 1 : 0),
+      { timeout: 120_000, shell: process.platform === "win32" },
+      (err) => resolve(err ? 1 : 0),
     );
     // Ignore stdin so an unexpected prompt cannot hang the child.
     child.stdin?.end();
