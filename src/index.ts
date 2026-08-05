@@ -37,12 +37,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     if (isLegacyPackage() && isNewPackageInstalled()) {
       pi.on("session_start", async (_event, ctx) => {
         if (ctx.hasUI) {
-          try {
-            const { checkRename } = await import("./rename-notice.js");
-            checkRename((m) => ctx.ui.notify(m));
-          } catch {
-            // best-effort
-          }
+          checkRename((m) => ctx.ui.notify(m));
         }
       });
       return;

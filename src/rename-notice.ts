@@ -1,5 +1,4 @@
 import { readFileSync, existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
@@ -8,8 +7,6 @@ const LEGACY_NAME = "pai-acp";
 const NEW_NAME = "billion-context-pi";
 const NEW_REF = `npm:${NEW_NAME}`;
 const REGISTRY_URL = `https://registry.npmjs.org/${NEW_NAME}/latest`;
-
-type PackageJson = { name?: string };
 
 /** Walk up from this module to find the extension's package.json (matching
  *  either name). SYNC version for use in the synchronous factory function.
@@ -55,10 +52,10 @@ export function isLegacyPackage(): boolean {
   }
 }
 
-/** SYNC: has billion-context-pi been installed in the shared node_modules?
- *  Used by the legacy factory to self-disable when the new package takes over.
- *  Checks the physical node_modules directory (not settings.json), so it is
- *  unaffected by settings scope (user vs project). */
+/** SYNC: has billion-context-pi been installed AND is it loadable?
+ *  Checks both package.json AND dist/index.js to avoid a partial install
+ *  (package.json written but dist missing) self-disabling the legacy package
+ *  before the new one can load — which would leave the user with no ACP tools. */
 export function isNewPackageInstalled(): boolean {
   const extDir = findExtensionDirSync();
   if (!extDir) return false;
@@ -68,7 +65,7 @@ export function isNewPackageInstalled(): boolean {
     const data = JSON.parse(
       readFileSync(join(npmDir, "node_modules", NEW_NAME, "package.json"), "utf-8"),
     );
-    return data?.name === NEW_NAME;
+    return data?.name === NEW_NAME && existsSync(join(npmDir, "node_modules", NEW_NAME, "dist", "index.js"));
   } catch {
     return false;
   }
