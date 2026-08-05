@@ -344,7 +344,12 @@ async function runDelegate(
   }
   debug.event("delegate-spawn", { agent: args.agent, cwd, async: isAsync, cliArgs });
 
-  const child = spawn("pi", cliArgs, {
+  // Spawn a child pi process using the SAME binary that is currently running.
+  // Hardcoding "pi" breaks under renamed forks (e.g. pi-stable whose bin is
+  // "pi-stable"). process.execPath is the Node binary, process.argv[1] is the
+  // cli.js entrypoint of the currently running pi — together they always point
+  // at the right executable regardless of how it was installed.
+  const child = spawn(process.execPath, [process.argv[1]!, ...cliArgs], {
     cwd,
     env: childEnv,
     stdio: ["pipe", "pipe", "pipe"],

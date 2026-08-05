@@ -4,9 +4,11 @@ import { createInitialState, type CompressionState } from "acp-kernel";
 
 const STATE_SUFFIX = ".acp.json";
 
-function stateFileFor(sessionFile: string | undefined, sessionId: string): string | null {
+function stateFileFor(sessionFile: string | undefined): string | null {
   if (sessionFile) return sessionFile + STATE_SUFFIX;
-  if (sessionId) return path.join(process.cwd(), `.acp-${sessionId}${STATE_SUFFIX}`);
+  // No session file (--no-session, e.g. delegate children): state is ephemeral,
+  // do NOT persist. Previously this fell back to process.cwd() and polluted
+  // the parent's working directory with .acp-<sid>.json litter.
   return null;
 }
 
@@ -14,8 +16,8 @@ export class SessionStateStore {
   private cache: CompressionState | null = null;
   private loadedKey: string | null = null;
 
-  async load(sessionFile: string | undefined, sessionId: string): Promise<CompressionState> {
-    const file = stateFileFor(sessionFile, sessionId);
+  async load(sessionFile: string | undefined, _sessionId: string): Promise<CompressionState> {
+    const file = stateFileFor(sessionFile);
     if (file && this.loadedKey === file && this.cache) return this.cache;
     let state = createInitialState();
     if (file) {
@@ -32,9 +34,9 @@ export class SessionStateStore {
     return state;
   }
 
-  async save(state: CompressionState, sessionFile: string | undefined, sessionId: string): Promise<void> {
-    const file = stateFileFor(sessionFile, sessionId);
-    if (!file) return;
+  async save(state: CompressionState, sessionFile: string | undefined, _sessionId: string): Promise<void> {
+    const file = stateFileFor(sessionFile);
+    if (!file) return; // ephemeral session: don't persist
     this.cache = state;
     this.loadedKey = file;
     const dir = path.dirname(file);
