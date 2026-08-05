@@ -20,6 +20,7 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { debug, setDebugEnabled } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
+import { getRenameNotice } from "./rename-notice.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 
@@ -76,6 +77,14 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
+    // Rename notice: pai-acp → billion-context-pi. No throttle — show every
+    // launch until the user migrates. Self-detects the running package name,
+    // so it stays silent once renamed.
+    if (ctx.hasUI) {
+      void getRenameNotice().then((msg) => {
+        if (msg) ctx.ui.notify(msg);
+      });
+    }
     // Idempotently ensure all builtin pi-subagents have ACP context tools
     // (compress/decompress/search_context/acp_status) in their allowlists.
     // Settings.json is patched safely (backup + optimistic mtime lock + verify).
