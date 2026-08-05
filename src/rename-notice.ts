@@ -2,12 +2,10 @@ import { readFile, writeFile, rename } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
-import { homedir } from "node:os";
 
 const LEGACY_NAME = "pai-acp";
 const NEW_NAME = "billion-context-pi";
 const REGISTRY_URL = `https://registry.npmjs.org/${NEW_NAME}/latest`;
-const SETTINGS_PATH = join(homedir(), ".pi", "agent", "settings.json");
 
 type PackageJson = { name?: string };
 
@@ -39,6 +37,15 @@ async function getPackageName(): Promise<string | undefined> {
   } catch {
     return undefined;
   }
+}
+
+/** Resolve settings.json location. Prefer inferring from the extension's
+ *  install location (works for any pi fork's configDir: the npm root is
+ *  always <agentDir>/npm, so its parent is agentDir). Fall back to the
+ *  standard ~/.pi/agent path if the structure is unexpected. */
+function resolveSettingsPath(npmDir: string): string {
+  const inferred = join(dirname(npmDir), "settings.json");
+  return inferred;
 }
 
 function findNpmRoot(extDir: string): string | undefined {
@@ -80,10 +87,11 @@ function runNpm(args: string[], cwd: string): Promise<number> {
 /** Atomically rewrite settings.json: replace "npm:pai-acp" with
  *  "npm:billion-context-pi" in the packages array. Returns false if the
  *  file is missing, unparseable, or doesn't reference pai-acp. */
-async function updateSettingsPackages(): Promise<boolean> {
+async function updateSettingsPackages(npmDir: string): Promise<boolean> {
+  const settingsPath = resolveSettingsPath(npmDir);
   let raw: string;
   try {
-    raw = await readFile(SETTINGS_PATH, "utf-8");
+    raw = await readFile(settingsPath, "utf-8");
   } catch {
     return false;
   }
@@ -98,10 +106,10 @@ async function updateSettingsPackages(): Promise<boolean> {
   const newRef = `npm:${NEW_NAME}`;
   if (!data.packages.includes(oldRef)) return false;
   data.packages = data.packages.map((p) => (p === oldRef ? newRef : p));
-  const tmp = `${SETTINGS_PATH}.tmp`;
+  const tmp = `${settingsPath}.tmp`;
   try {
     await writeFile(tmp, JSON.stringify(data, null, "\t"), "utf-8");
-    await rename(tmp, SETTINGS_PATH);
+    await rename(tmp, settingsPath);
     return true;
   } catch {
     return false;
@@ -148,7 +156,7 @@ async function autoMigrate(): Promise<string> {
   }
   // 2. Rewrite settings.json. If this fails, don't uninstall — leave both
   //    packages present so the user can fix it manually.
-  if (!(await updateSettingsPackages())) {
+  if (!(await updateSettingsPackages(npmDir))) {
     return manualNotice();
   }
   // 3. Uninstall the legacy package. Current process is unaffected (ESM
