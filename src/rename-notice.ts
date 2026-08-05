@@ -114,18 +114,23 @@ const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 function manualNotice(): string {
-  return [
-    `${CYAN}\u2192 pai-acp is now billion-context-pi${RESET}`,
-    `${DIM}Your context tools are unchanged — same package, new name.${RESET}`,
-    `To switch:`,
-    `  ${DIM}pi uninstall pai-acp${RESET}`,
-    `  ${DIM}pi install billion-context-pi${RESET}`,
-    `${DIM}(Your ~/.pi/acp.json config carries over.)${RESET}`,
+  // NB: wrap the whole block in a single color span (no per-line resets).
+  // pi's showStatus wraps the message in theme.fg("dim", ...) — a per-line
+  // reset would clear that dim and leave subsequent lines colorless.
+  const body = [
+    "\u2192 pai-acp is now billion-context-pi",
+    "Your context tools are unchanged — same package, new name.",
+    "To switch:",
+    "  pi uninstall pai-acp",
+    "  pi install billion-context-pi",
+    "(Your ~/.pi/acp.json config carries over.)",
   ].join("\n");
+  return `${CYAN}${body}${RESET}`;
 }
 
 function successNotice(): string {
-  return `${GREEN}\u2714 Auto-migrated to billion-context-pi${RESET} — ${DIM}restart Pi to finish.${RESET}`;
+  const body = `✔ Auto-migrated to billion-context-pi — restart Pi to finish.`;
+  return `${GREEN}${body}${RESET}`;
 }
 
 /** Auto-migrate: install the new package, rewrite settings.json, uninstall
