@@ -20,7 +20,7 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { debug, setDebugEnabled } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
-import { checkRename } from "./rename-notice.js";
+import { checkRename, isLegacyPackage, isNewPackageInstalled } from "./rename-notice.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
 
@@ -28,6 +28,26 @@ type AgentMessage = SessionMessageEntry["message"];
 
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
+    // Self-disable: if this is the legacy pai-acp package AND the new
+    // billion-context-pi is already installed in node_modules, register
+    // nothing (no tools, no context hooks) so both packages can coexist in
+    // settings.json without double-registering compress/decompress or running
+    // context transforms twice. The new package takes over entirely; the
+    // legacy one is inert and just nudges the user to uninstall it.
+    if (isLegacyPackage() && isNewPackageInstalled()) {
+      pi.on("session_start", async (_event, ctx) => {
+        if (ctx.hasUI) {
+          try {
+            const { checkRename } = await import("./rename-notice.js");
+            checkRename((m) => ctx.ui.notify(m));
+          } catch {
+            // best-effort
+          }
+        }
+      });
+      return;
+    }
+
     const runtime = createRuntime(adapter);
     wireCompactionDisable(pi);
     wireSessionLifecycle(pi, runtime);
@@ -77,11 +97,11 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     void checkForUpdate(runtime.adapter.autoUpdate ?? true, (msg) => {
       if (ctx.hasUI) ctx.ui.notify(msg);
     });
-    // Rename: pai-acp → billion-context-pi. Auto-migrates (install new +
-    // rewrite settings + uninstall old) once a real version of the new
-    // package is published; until then shows a friendly notice. Self-detects
-    // the running package name, so it stays silent once renamed.
-    if (ctx.hasUI) {
+    // Rename: pai-acp → billion-context-pi. Once a real version of the new
+    // package is published, installs it (additive — does NOT uninstall the
+    // legacy package). On next launch the factory self-disables the legacy
+    // copy when it detects the new package in node_modules.
+    if (isLegacyPackage() && ctx.hasUI) {
       void checkRename((msg) => ctx.ui.notify(msg));
     }
     // Idempotently ensure all builtin pi-subagents have ACP context tools

@@ -1,23 +1,25 @@
-import { readFile, writeFile, rename } from "node:fs/promises";
+import { readFileSync, existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFile } from "node:child_process";
 
 const LEGACY_NAME = "pai-acp";
 const NEW_NAME = "billion-context-pi";
-const LEGACY_REF = `npm:${LEGACY_NAME}`;
 const NEW_REF = `npm:${NEW_NAME}`;
 const REGISTRY_URL = `https://registry.npmjs.org/${NEW_NAME}/latest`;
 
 type PackageJson = { name?: string };
 
 /** Walk up from this module to find the extension's package.json (matching
- *  either the legacy or new name). Returns the directory or undefined. */
-async function findExtensionDir(): Promise<string | undefined> {
+ *  either name). SYNC version for use in the synchronous factory function.
+ *  Uses the `parent === dir` stabilization guard so it terminates on Windows
+ *  drive roots (e.g. `C:\`) where `dirname("C:\\") === "C:\\"`. */
+function findExtensionDirSync(): string | undefined {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
     try {
-      const data = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
+      const data = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
       if (data?.name === LEGACY_NAME || data?.name === NEW_NAME) return dir;
     } catch {
       // not found / bad json — keep walking
@@ -28,39 +30,53 @@ async function findExtensionDir(): Promise<string | undefined> {
   }
 }
 
-/** Returns the running package name (pai-acp or billion-context-pi), or
- *  undefined if it cannot be determined. */
-async function getPackageName(): Promise<string | undefined> {
-  const dir = await findExtensionDir();
-  if (!dir) return undefined;
-  try {
-    const data = JSON.parse(await readFile(join(dir, "package.json"), "utf-8"));
-    return data?.name;
-  } catch {
-    return undefined;
-  }
-}
-
-function findNpmRoot(extDir: string): string | undefined {
+/** Walk up to the npm root (first ancestor ending in `node_modules`, return
+ *  its parent). SYNC. Same stabilization guard as findExtensionDirSync. */
+function findNpmRootSync(extDir: string): string | undefined {
   let dir = dirname(extDir);
-  while (dir !== "/" && dir !== ".") {
+  for (;;) {
     if (dir.endsWith("node_modules")) return dirname(dir);
-    dir = dirname(dir);
+    const parent = dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
   }
-  return undefined;
 }
 
-/** Resolve settings.json location. pai-acp lives in
- *  <agentDir>/npm/node_modules/pai-acp, so the npm root is <agentDir>/npm
- *  and its parent is agentDir. Works for any pi fork's configDir. */
-function resolveSettingsPath(npmDir: string): string {
-  return join(dirname(npmDir), "settings.json");
+/** SYNC: is the running package the legacy pai-acp? Used by the factory to
+ *  decide whether self-disable logic applies. */
+export function isLegacyPackage(): boolean {
+  const dir = findExtensionDirSync();
+  if (!dir) return false;
+  try {
+    const data = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+    return data?.name === LEGACY_NAME;
+  } catch {
+    return false;
+  }
+}
+
+/** SYNC: has billion-context-pi been installed in the shared node_modules?
+ *  Used by the legacy factory to self-disable when the new package takes over.
+ *  Checks the physical node_modules directory (not settings.json), so it is
+ *  unaffected by settings scope (user vs project). */
+export function isNewPackageInstalled(): boolean {
+  const extDir = findExtensionDirSync();
+  if (!extDir) return false;
+  const npmDir = findNpmRootSync(extDir);
+  if (!npmDir) return false;
+  try {
+    const data = JSON.parse(
+      readFileSync(join(npmDir, "node_modules", NEW_NAME, "package.json"), "utf-8"),
+    );
+    return data?.name === NEW_NAME;
+  } catch {
+    return false;
+  }
 }
 
 /** Returns true if billion-context-pi has a real release (version > 0.0.1
  *  placeholder) published to npm. Migration only fires once a real version
- *  exists — otherwise it would install the empty placeholder and the user
- *  would lose all ACP functionality. */
+ *  exists — otherwise it would install the empty placeholder. */
 async function newPackageReady(): Promise<boolean> {
   try {
     const res = await fetch(REGISTRY_URL, {
@@ -77,57 +93,21 @@ async function newPackageReady(): Promise<boolean> {
 }
 
 /** Run a pi subcommand using the CURRENT pi process (node + cli.js), so the
- *  migration follows whatever pi fork the user is running (pi / pi-stable /
- *  any other). stdin is ignored to avoid hanging on unexpected prompts. */
+ *  install follows whatever pi fork the user is running. stdin is ignored to
+ *  avoid hanging on unexpected prompts. */
 function runPi(args: string[]): Promise<number> {
   const cliEntry = process.argv[1];
-  if (!cliEntry) return Promise.resolve(1);
+  if (!cliEntry || !existsSync(cliEntry)) return Promise.resolve(1);
   return new Promise((resolve) => {
-    execFile(
+    const child = execFile(
       process.execPath,
       [cliEntry, ...args],
       { timeout: 120_000, shell: false },
-      (err) => resolve(err ? 1 : 0),
+      (err: NodeJS.ErrnoException | null) => resolve(err ? 1 : 0),
     );
+    // Ignore stdin so an unexpected prompt cannot hang the child.
+    child.stdin?.end();
   });
-}
-
-/** Backup settings.json for restore-on-failure. Returns the backup path or
- *  undefined if backup failed (caller falls back to manual notice). */
-async function backupSettings(settingsPath: string): Promise<string | undefined> {
-  try {
-    const bak = `${settingsPath}.migrate.bak`;
-    const raw = await readFile(settingsPath, "utf-8");
-    await writeFile(bak, raw, "utf-8");
-    return bak;
-  } catch {
-    return undefined;
-  }
-}
-
-async function restoreSettings(settingsPath: string, bak: string): Promise<void> {
-  try {
-    const raw = await readFile(bak, "utf-8");
-    const tmp = `${settingsPath}.tmp`;
-    await writeFile(tmp, raw, "utf-8");
-    await rename(tmp, settingsPath);
-  } catch {
-    // best-effort restore; if this fails the user is in an unknown state,
-    // but pi's own install/uninstall failures leave settings in a consistent
-    // shape (they use the SettingsManager which is transactional).
-  }
-}
-
-/** Verify migration outcome: settings.json should reference the new package
- *  and not the legacy one. */
-async function verifyMigrated(settingsPath: string): Promise<boolean> {
-  try {
-    const data = JSON.parse(await readFile(settingsPath, "utf-8"));
-    const pkgs: string[] = Array.isArray(data.packages) ? data.packages : [];
-    return pkgs.includes(NEW_REF) && !pkgs.includes(LEGACY_REF);
-  } catch {
-    return false;
-  }
 }
 
 const GREEN = "\x1b[32m";
@@ -135,94 +115,79 @@ const CYAN = "\x1b[36m";
 const RESET = "\x1b[0m";
 
 function manualNotice(): string {
-  // NB: wrap the whole block in a single color span (no per-line resets).
-  // pi's showStatus wraps the message in theme.fg("dim", ...) — a per-line
-  // reset would clear that dim and leave subsequent lines colorless.
   const body = [
     "\u2192 pai-acp is now billion-context-pi",
     "Your context tools are unchanged — same package, new name.",
     "To switch:",
-    "  pi uninstall pai-acp",
     "  pi install billion-context-pi",
+    "  pi uninstall pai-acp",
     "(Your ~/.pi/acp.json config carries over.)",
   ].join("\n");
   return `${CYAN}${body}${RESET}`;
 }
 
+function installingNotice(): string {
+  return `${CYAN}Installing billion-context-pi\u2026${RESET}`;
+}
+
 function successNotice(): string {
-  const body = `✔ Auto-migrated to billion-context-pi — restart Pi to finish.`;
-  return `${GREEN}${body}${RESET}`;
+  return `${GREEN}\u2714 billion-context-pi installed — restart Pi to switch.${RESET}`;
 }
 
-function rollbackNotice(): string {
+/** Notice shown when self-disabled (new package is active, legacy is inert). */
+function canUninstallNotice(): string {
   const body = [
-    "\u2192 pai-acp → billion-context-pi migration was rolled back.",
-    "Settings restored. You can migrate manually:",
-    "  pi uninstall pai-acp",
-    "  pi install billion-context-pi",
+    `${GREEN}\u2714 billion-context-pi is active.${RESET}`,
+    `${CYAN}pai-acp is now inert. To clean up:${RESET}`,
+    `  ${CYAN}pi uninstall pai-acp${RESET}`,
   ].join("\n");
-  return `${CYAN}${body}${RESET}`;
+  return body;
 }
 
-/** Auto-migrate using the running pi's own package manager (pi install /
- *  pi uninstall), not raw npm — so location, lockfile and settings.json are
- *  all handled correctly by pi itself. Order: backup → install new →
- *  uninstall old → verify. Any failure restores the backup and falls back
- *  to the manual notice. The current process keeps running from in-memory
- *  code, so uninstalling the legacy package on disk is safe. */
-async function autoMigrate(): Promise<string> {
-  const extDir = await findExtensionDir();
-  if (!extDir) return manualNotice();
-  const npmDir = findNpmRoot(extDir);
-  if (!npmDir) return manualNotice();
-  const settingsPath = resolveSettingsPath(npmDir);
-
-  // 1. Backup settings.json (atomic-ish: we read then write a sibling file).
-  const bak = await backupSettings(settingsPath);
-
-  // 2. Install the new package first. If this fails, nothing changed
-  //    (pi install is transactional) — settings still has pai-acp only.
-  if ((await runPi(["install", NEW_REF])) !== 0) {
-    return manualNotice();
-  }
-
-  // 3. Uninstall the legacy package. If this fails, settings may now have
-  //    both packages — restore the backup so the user boots into pai-acp
-  //    (not a double-loaded state). The newly installed billion-context-pi
-  //    on disk is harmless (unused until referenced).
-  if ((await runPi(["uninstall", LEGACY_REF])) !== 0) {
-    if (bak) await restoreSettings(settingsPath, bak);
-    return bak ? rollbackNotice() : manualNotice();
-  }
-
-  // 4. Verify the final settings state.
-  if (!(await verifyMigrated(settingsPath))) {
-    if (bak) await restoreSettings(settingsPath, bak);
-    return bak ? rollbackNotice() : manualNotice();
-  }
-
-  return successNotice();
+/** Install the new package alongside the legacy one (does NOT uninstall the
+ *  legacy package). Safe because install is additive and idempotent: a
+ *  failure leaves settings.json unchanged, and two concurrent sessions both
+ *  installing the same package is harmless. Returns true on success. */
+async function installNewPackage(): Promise<boolean> {
+  return (await runPi(["install", NEW_REF])) === 0;
 }
 
 let migrateInFlight = false;
 
-/** Checks if the extension is running under the legacy name (pai-acp) and
- *  migrates to billion-context-pi. If a real version of the new package is
- *  published, performs the migration automatically (backup → install new →
- *  uninstall old → verify, with rollback on any failure). Otherwise, shows a
- *  friendly notice with manual steps. Stays silent once renamed. */
+/** Called from session_start of the LEGACY package (only). If the new package
+ *  has a real release on npm, installs it and notifies the user to restart.
+ *  The legacy package then self-disables on the next launch (factory detects
+ *  the new package in node_modules and registers nothing). Until a real
+ *  release exists, shows a friendly manual notice. */
 export async function checkRename(notify: (msg: string) => void): Promise<void> {
-  const name = await getPackageName();
-  if (name !== LEGACY_NAME) return;
+  const safeNotify = (msg: string) => {
+    try {
+      notify(msg);
+    } catch {
+      // notification must never crash the host
+    }
+  };
   if (migrateInFlight) return;
   migrateInFlight = true;
   try {
+    // If the new package is already installed, this session is the inert
+    // legacy copy (the factory already self-disabled the active logic).
+    // Just nudge the user to uninstall.
+    if (isNewPackageInstalled()) {
+      safeNotify(canUninstallNotice());
+      return;
+    }
     const ready = await newPackageReady();
-    const msg = ready ? await autoMigrate() : manualNotice();
-    notify(msg);
+    if (!ready) {
+      safeNotify(manualNotice());
+      return;
+    }
+    // Real version exists — install it (additive, safe).
+    safeNotify(installingNotice());
+    const ok = await installNewPackage();
+    safeNotify(ok ? successNotice() : manualNotice());
   } catch {
-    // any unexpected error — fall back to manual notice, don't crash
-    notify(manualNotice());
+    safeNotify(manualNotice());
   } finally {
     migrateInFlight = false;
   }
