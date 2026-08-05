@@ -6,6 +6,8 @@
 
 **pai-acp** is the [Pi coding agent](https://github.com/nickthecook/pi) adapter for ACP (Active Context Pruning). It wires acp-kernel's compression pipeline into Pi's extension system, providing model-driven context management.
 
+Beyond compression, pai-acp ships a lightweight **sub-agent delegation** subsystem: the `acp_delegate` / `acp_delegate_wait` / `acp_delegate_cancel` tools spawn fresh `pi` child processes (clean context) for focused review/research/implementation tasks, with async results injected back into the parent chat. A live TUI status widget (`fleet-widget.ts`) shows running delegates. `setup-subagent-tools.ts` patches `~/.pi/agent/settings.json` so builtin subagents inherit ACP tools. The subsystem is ~900 lines across three files and is considered feature-complete — no further growth is planned.
+
 ### Tech Stack
 
 | Category | Technology |
@@ -42,11 +44,15 @@ pi-acp/
 │   ├── search-index.ts       # Builds SearchDoc[] from session log + ACP blocks
 │   ├── status-tool.ts        # acp_status tool (delegates to kernel.buildStatusReport)
 │   ├── commands.ts           # /acp slash command
+│   ├── delegate-tool.ts      # Sub-agent delegation: spawn child Pi, wait/cancel tools
+│   ├── fleet-widget.ts       # TUI status widget showing live delegate runs
+│   ├── setup-subagent-tools.ts  # Patches ~/.pi/agent/settings.json: inject ACP tools into builtin subagents
 │   ├── system-prompt.ts      # System prompt with compression philosophy
 │   ├── update.ts             # Auto-update: checks npm, auto-installs latest
+│   ├── user-config.ts        # User config (~/.pi/acp.json + project-level overrides)
 │   ├── tokens.ts             # Token estimation utilities
 │   └── log.ts                # Debug logging
-├── tests/                    # 45 tests
+├── tests/                    # 47 tests
 ├── tsup.config.ts
 └── package.json
 ```
@@ -59,6 +65,17 @@ pi-acp/
 4. **Tags appended to END of text** — matches opencode-acp pattern
 5. **Auto-update on session_start** — checks npm registry (6h throttle), auto-installs if newer
 6. **acp-kernel MUST be pinned to an exact version** (e.g. `"acp-kernel": "0.0.14"`, NEVER `"^0.0.14"`). Because acp-kernel is a build-time dependency that tsup bundles inline into `dist`, a caret range makes the resolved version drift if `package-lock.json` is regenerated or absent, breaking reproducible builds. When bumping acp-kernel: set the exact version in `package.json`, run `npm install` to refresh the lockfile, then rebuild. The `package-lock.json` is committed and kept in sync.
+
+### Delegate Subsystem
+
+A self-contained (~900 lines, 3 files) feature for spawning focused sub-tasks as fresh `pi` child processes. Design points:
+
+1. **Child process isolation** — `delegate-tool.ts:spawn` launches a separate `pi` invocation in a tmpdir; the child runs with a clean context (no parent history), so delegation is NOT a compression mechanism — it is a parallel-execution mechanism.
+2. **Three tools** — `acp_delegate` (spawn + return runId), `acp_delegate_wait` (block until done, returns child output), `acp_delegate_cancel` (signal child). All in `delegate-tool.ts`.
+3. **Toggle via config** — `AdapterConfig.delegate` (default `true`); when `false`, the tools are not registered and the widget is skipped.
+4. **Fleet widget** — `fleet-widget.ts` renders a TUI status row of live delegate runs, polled every 500ms via the host's widget API. Only active in TUI mode.
+5. **Subagent tool injection** — `setup-subagent-tools.ts` patches `~/.pi/agent/settings.json` on session start to add ACP tools (`compress`, `search_context`, etc.) to Pi's builtin subagents' allow-lists, so delegated children also benefit from compression. Creates a timestamped backup before writing; no-op if already patched.
+6. **Feature-complete** — no new subsystem work is planned. Bug fixes and Pi API drift only.
 
 ## 3. Development Standards
 
