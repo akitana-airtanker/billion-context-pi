@@ -5,6 +5,8 @@ import { execFile } from "node:child_process";
 
 const LEGACY_NAME = "pai-acp";
 const NEW_NAME = "billion-context-pi";
+const LEGACY_REF = `npm:${LEGACY_NAME}`;
+const NEW_REF = `npm:${NEW_NAME}`;
 const REGISTRY_URL = `https://registry.npmjs.org/${NEW_NAME}/latest`;
 
 type PackageJson = { name?: string };
@@ -39,15 +41,6 @@ async function getPackageName(): Promise<string | undefined> {
   }
 }
 
-/** Resolve settings.json location. Prefer inferring from the extension's
- *  install location (works for any pi fork's configDir: the npm root is
- *  always <agentDir>/npm, so its parent is agentDir). Fall back to the
- *  standard ~/.pi/agent path if the structure is unexpected. */
-function resolveSettingsPath(npmDir: string): string {
-  const inferred = join(dirname(npmDir), "settings.json");
-  return inferred;
-}
-
 function findNpmRoot(extDir: string): string | undefined {
   let dir = dirname(extDir);
   while (dir !== "/" && dir !== ".") {
@@ -55,6 +48,13 @@ function findNpmRoot(extDir: string): string | undefined {
     dir = dirname(dir);
   }
   return undefined;
+}
+
+/** Resolve settings.json location. pai-acp lives in
+ *  <agentDir>/npm/node_modules/pai-acp, so the npm root is <agentDir>/npm
+ *  and its parent is agentDir. Works for any pi fork's configDir. */
+function resolveSettingsPath(npmDir: string): string {
+  return join(dirname(npmDir), "settings.json");
 }
 
 /** Returns true if billion-context-pi has a real release (version > 0.0.1
@@ -76,41 +76,55 @@ async function newPackageReady(): Promise<boolean> {
   }
 }
 
-function runNpm(args: string[], cwd: string): Promise<number> {
+/** Run a pi subcommand using the CURRENT pi process (node + cli.js), so the
+ *  migration follows whatever pi fork the user is running (pi / pi-stable /
+ *  any other). stdin is ignored to avoid hanging on unexpected prompts. */
+function runPi(args: string[]): Promise<number> {
+  const cliEntry = process.argv[1];
+  if (!cliEntry) return Promise.resolve(1);
   return new Promise((resolve) => {
-    execFile("npm", args, { cwd, timeout: 60_000, shell: process.platform === "win32" }, (err) =>
-      resolve(err ? 1 : 0),
+    execFile(
+      process.execPath,
+      [cliEntry, ...args],
+      { timeout: 120_000, shell: false },
+      (err) => resolve(err ? 1 : 0),
     );
   });
 }
 
-/** Atomically rewrite settings.json: replace "npm:pai-acp" with
- *  "npm:billion-context-pi" in the packages array. Returns false if the
- *  file is missing, unparseable, or doesn't reference pai-acp. */
-async function updateSettingsPackages(npmDir: string): Promise<boolean> {
-  const settingsPath = resolveSettingsPath(npmDir);
-  let raw: string;
+/** Backup settings.json for restore-on-failure. Returns the backup path or
+ *  undefined if backup failed (caller falls back to manual notice). */
+async function backupSettings(settingsPath: string): Promise<string | undefined> {
   try {
-    raw = await readFile(settingsPath, "utf-8");
+    const bak = `${settingsPath}.migrate.bak`;
+    const raw = await readFile(settingsPath, "utf-8");
+    await writeFile(bak, raw, "utf-8");
+    return bak;
   } catch {
-    return false;
+    return undefined;
   }
-  let data: { packages?: string[] };
+}
+
+async function restoreSettings(settingsPath: string, bak: string): Promise<void> {
   try {
-    data = JSON.parse(raw);
-  } catch {
-    return false;
-  }
-  if (!Array.isArray(data.packages)) return false;
-  const oldRef = `npm:${LEGACY_NAME}`;
-  const newRef = `npm:${NEW_NAME}`;
-  if (!data.packages.includes(oldRef)) return false;
-  data.packages = data.packages.map((p) => (p === oldRef ? newRef : p));
-  const tmp = `${settingsPath}.tmp`;
-  try {
-    await writeFile(tmp, JSON.stringify(data, null, "\t"), "utf-8");
+    const raw = await readFile(bak, "utf-8");
+    const tmp = `${settingsPath}.tmp`;
+    await writeFile(tmp, raw, "utf-8");
     await rename(tmp, settingsPath);
-    return true;
+  } catch {
+    // best-effort restore; if this fails the user is in an unknown state,
+    // but pi's own install/uninstall failures leave settings in a consistent
+    // shape (they use the SettingsManager which is transactional).
+  }
+}
+
+/** Verify migration outcome: settings.json should reference the new package
+ *  and not the legacy one. */
+async function verifyMigrated(settingsPath: string): Promise<boolean> {
+  try {
+    const data = JSON.parse(await readFile(settingsPath, "utf-8"));
+    const pkgs: string[] = Array.isArray(data.packages) ? data.packages : [];
+    return pkgs.includes(NEW_REF) && !pkgs.includes(LEGACY_REF);
   } catch {
     return false;
   }
@@ -118,7 +132,6 @@ async function updateSettingsPackages(npmDir: string): Promise<boolean> {
 
 const GREEN = "\x1b[32m";
 const CYAN = "\x1b[36m";
-const DIM = "\x1b[2m";
 const RESET = "\x1b[0m";
 
 function manualNotice(): string {
@@ -141,27 +154,52 @@ function successNotice(): string {
   return `${GREEN}${body}${RESET}`;
 }
 
-/** Auto-migrate: install the new package, rewrite settings.json, uninstall
- *  the legacy package. The current process keeps running from in-memory
- *  code, so deleting the on-disk package is safe. Returns a notice string. */
+function rollbackNotice(): string {
+  const body = [
+    "\u2192 pai-acp → billion-context-pi migration was rolled back.",
+    "Settings restored. You can migrate manually:",
+    "  pi uninstall pai-acp",
+    "  pi install billion-context-pi",
+  ].join("\n");
+  return `${CYAN}${body}${RESET}`;
+}
+
+/** Auto-migrate using the running pi's own package manager (pi install /
+ *  pi uninstall), not raw npm — so location, lockfile and settings.json are
+ *  all handled correctly by pi itself. Order: backup → install new →
+ *  uninstall old → verify. Any failure restores the backup and falls back
+ *  to the manual notice. The current process keeps running from in-memory
+ *  code, so uninstalling the legacy package on disk is safe. */
 async function autoMigrate(): Promise<string> {
   const extDir = await findExtensionDir();
   if (!extDir) return manualNotice();
   const npmDir = findNpmRoot(extDir);
   if (!npmDir) return manualNotice();
+  const settingsPath = resolveSettingsPath(npmDir);
 
-  // 1. Install the new package.
-  if ((await runNpm(["install", `${NEW_NAME}@latest`, "--silent", "--no-audit", "--no-fund"], npmDir)) !== 0) {
+  // 1. Backup settings.json (atomic-ish: we read then write a sibling file).
+  const bak = await backupSettings(settingsPath);
+
+  // 2. Install the new package first. If this fails, nothing changed
+  //    (pi install is transactional) — settings still has pai-acp only.
+  if ((await runPi(["install", NEW_REF])) !== 0) {
     return manualNotice();
   }
-  // 2. Rewrite settings.json. If this fails, don't uninstall — leave both
-  //    packages present so the user can fix it manually.
-  if (!(await updateSettingsPackages(npmDir))) {
-    return manualNotice();
+
+  // 3. Uninstall the legacy package. If this fails, settings may now have
+  //    both packages — restore the backup so the user boots into pai-acp
+  //    (not a double-loaded state). The newly installed billion-context-pi
+  //    on disk is harmless (unused until referenced).
+  if ((await runPi(["uninstall", LEGACY_REF])) !== 0) {
+    if (bak) await restoreSettings(settingsPath, bak);
+    return bak ? rollbackNotice() : manualNotice();
   }
-  // 3. Uninstall the legacy package. Current process is unaffected (ESM
-  //    modules are loaded into memory; deleting the directory is safe).
-  await runNpm(["uninstall", LEGACY_NAME, "--silent"], npmDir);
+
+  // 4. Verify the final settings state.
+  if (!(await verifyMigrated(settingsPath))) {
+    if (bak) await restoreSettings(settingsPath, bak);
+    return bak ? rollbackNotice() : manualNotice();
+  }
 
   return successNotice();
 }
@@ -170,9 +208,9 @@ let migrateInFlight = false;
 
 /** Checks if the extension is running under the legacy name (pai-acp) and
  *  migrates to billion-context-pi. If a real version of the new package is
- *  published, performs the migration automatically (install + config update
- *  + uninstall). Otherwise, shows a friendly notice with manual steps.
- *  Stays silent once renamed. */
+ *  published, performs the migration automatically (backup → install new →
+ *  uninstall old → verify, with rollback on any failure). Otherwise, shows a
+ *  friendly notice with manual steps. Stays silent once renamed. */
 export async function checkRename(notify: (msg: string) => void): Promise<void> {
   const name = await getPackageName();
   if (name !== LEGACY_NAME) return;
