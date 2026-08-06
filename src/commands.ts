@@ -1,8 +1,31 @@
 import type { ExtensionCommandContext, RegisteredCommand } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges } from "acp-kernel";
+import { readFileSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 declare const CURRENT_VERSION: string;
+
+/** The running package name, resolved from the extension's own package.json.
+ *  Same source works under both names (pai-acp and billion-context-pi). */
+function getDisplayName(): string {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (;;) {
+      const pkg = JSON.parse(readFileSync(join(dir, "package.json"), "utf-8"));
+      if (pkg?.name === "pai-acp" || pkg?.name === "billion-context-pi") {
+        return pkg.name;
+      }
+      const parent = dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  } catch {
+    // best-effort
+  }
+  return "pai-acp";
+}
 
 type CommandOptions = Omit<RegisteredCommand, "name" | "sourceInfo">;
 
@@ -113,7 +136,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
   const lines: string[] = [];
 
-  const versionStr = CURRENT_VERSION ? `pai-acp@${CURRENT_VERSION}` : "";
+  const versionStr = CURRENT_VERSION ? `${getDisplayName()}@${CURRENT_VERSION}` : "";
 
   lines.push("╭─────────────────────────────────────────────╮");
   lines.push("│           ACP Context Analysis              │");
