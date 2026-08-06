@@ -6,15 +6,33 @@ import { debug } from "./log.js";
 
 declare const CURRENT_VERSION: string;
 
-const PACKAGE_NAME = "pai-acp";
-const REGISTRY_URL = `https://registry.npmjs.org/${PACKAGE_NAME}/latest`;
+const LEGACY_NAME = "pai-acp";
+const REGISTRY_BASE = "https://registry.npmjs.org";
 const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z-.]+)?$/;
 const CHECK_INTERVAL_MS = 3 * 60 * 1000;
+// Throttle file is suffixed with the running package name so pai-acp and
+// billion-context-pi don't share the same update-check timestamp.
+function throttleFilePath(name: string): string {
+  return `${process.env.HOME ?? ""}/.pi/agent/.${name}-update-check`;
+}
 const THROTTLE_FILE = `${process.env.HOME ?? ""}/.pi/agent/.pai-acp-update-check`;
 
 // Guards against concurrent checks: the context event fires on every LLM call,
 // so several can race past the throttle read before any writes the timestamp.
 let updateInFlight = false;
+
+/** The running package name, resolved lazily from the extension's own
+ *  package.json. Same source works under both names (pai-acp and the renamed
+ *  billion-context-pi) without editing constants. */
+let cachedPackageName: string | undefined;
+async function getPackageName(): Promise<string | undefined> {
+  if (cachedPackageName !== undefined) return cachedPackageName;
+  const dir = await findExtensionDir();
+  if (!dir) return undefined;
+  const pkg = await readPackageJson(join(dir, "package.json"));
+  cachedPackageName = pkg?.name;
+  return cachedPackageName;
+}
 
 function parseVersion(v: string): number[] {
   return v.replace(/^v/, "").split(".").map((n) => parseInt(n, 10) || 0);
@@ -30,19 +48,19 @@ function isNewer(latest: string, current: string): boolean {
   return false;
 }
 
-async function readLastCheck(): Promise<number> {
+async function readLastCheck(name: string): Promise<number> {
   try {
-    const data = await readFile(THROTTLE_FILE, "utf-8");
+    const data = await readFile(throttleFilePath(name), "utf-8");
     return parseInt(data.trim(), 10) || 0;
   } catch {
     return 0;
   }
 }
 
-async function writeLastCheck(timestamp: number): Promise<void> {
+async function writeLastCheck(name: string, timestamp: number): Promise<void> {
   try {
-    await mkdir(dirname(THROTTLE_FILE), { recursive: true });
-    await writeFile(THROTTLE_FILE, String(timestamp), "utf-8");
+    await mkdir(dirname(throttleFilePath(name)), { recursive: true });
+    await writeFile(throttleFilePath(name), String(timestamp), "utf-8");
   } catch {
     // best-effort
   }
@@ -76,7 +94,7 @@ async function findExtensionDir(): Promise<string | undefined> {
   let dir = dirname(fileURLToPath(import.meta.url));
   for (;;) {
     const pkg = await readPackageJson(join(dir, "package.json"));
-    if (pkg?.name === PACKAGE_NAME) return dir;
+    if (pkg?.name === LEGACY_NAME || pkg?.name === "billion-context-pi") return dir;
     const parent = dirname(dir);
     if (parent === dir) return undefined;
     dir = parent;
@@ -94,10 +112,12 @@ async function autoInstallLatest(latest: string): Promise<boolean> {
   if (!npmDir) return false;
 
   try {
+    const packageName = await getPackageName();
+    if (!packageName) return false;
     const code = await new Promise<number>((resolve) => {
       execFile(
         "npm",
-        ["install", `${PACKAGE_NAME}@${latest}`, "--silent", "--no-audit", "--no-fund"],
+        ["install", `${packageName}@${latest}`, "--silent", "--no-audit", "--no-fund"],
         { cwd: npmDir, timeout: 60_000, shell: process.platform === "win32" },
         (err) => resolve(err ? 1 : 0),
       );
@@ -125,15 +145,17 @@ export async function checkForUpdate(
   if (updateInFlight) return;
   updateInFlight = true;
   try {
+    const packageName = await getPackageName();
+    if (!packageName) return;
     const now = Date.now();
-    const lastCheck = await readLastCheck();
+    const lastCheck = await readLastCheck(packageName);
     if (now - lastCheck < CHECK_INTERVAL_MS) return;
 
-    await writeLastCheck(now);
+    await writeLastCheck(packageName, now);
 
     const runtimeVersion = await getRuntimeVersion();
 
-    const res = await fetch(REGISTRY_URL, {
+    const res = await fetch(`${REGISTRY_BASE}/${packageName}/latest`, {
       signal: AbortSignal.timeout(5000),
       headers: { Accept: "application/json" },
     });
@@ -157,7 +179,7 @@ export async function checkForUpdate(
         );
       } else if (!installed && notify) {
         notify(
-          `${PACKAGE_NAME} ${latest} available (you have ${current}). Run: pi update --extension npm:${PACKAGE_NAME}`,
+          `${packageName} ${latest} available (you have ${current}). Run: pi update --extension npm:${packageName}`,
         );
       }
     }
