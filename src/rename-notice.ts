@@ -113,12 +113,10 @@ const RESET = "\x1b[0m";
 
 function manualNotice(): string {
   const body = [
-    "\u2192 pai-acp is now billion-context-pi",
+    "\u2192 pai-acp has been renamed to billion-context-pi",
     "Your context tools are unchanged — same package, new name.",
-    "To switch:",
-    "  pi install billion-context-pi",
-    "  pi uninstall pai-acp",
-    "(Your ~/.pi/acp.json config carries over.)",
+    "Once billion-context-pi is published, it will install automatically.",
+    "Your ~/.pi/acp.json config carries over.",
   ].join("\n");
   return `${CYAN}${body}${RESET}`;
 }
@@ -128,17 +126,22 @@ function installingNotice(): string {
 }
 
 function successNotice(): string {
-  return `${GREEN}\u2714 billion-context-pi installed — restart Pi to switch.${RESET}`;
+  const body = [
+    "\u2714 pai-acp \u2192 billion-context-pi (renamed, same tools).",
+    "billion-context-pi has been installed. Restart Pi to switch over.",
+    "Do NOT uninstall billion-context-pi — it is the replacement for pai-acp.",
+  ].join("\n");
+  return `${GREEN}${body}${RESET}`;
 }
 
 /** Notice shown when self-disabled (new package is active, legacy is inert). */
 function canUninstallNotice(): string {
   const body = [
-    `${GREEN}\u2714 billion-context-pi is active.${RESET}`,
-    `${CYAN}pai-acp is now inert. To clean up:${RESET}`,
-    `  ${CYAN}pi uninstall pai-acp${RESET}`,
+    "\u2714 You are now running billion-context-pi (formerly pai-acp).",
+    "All your context tools (compress / decompress / search / delegate) are intact.",
+    "pai-acp is now inert and safe to remove:  pi uninstall pai-acp",
   ].join("\n");
-  return body;
+  return `${GREEN}${body}${RESET}`;
 }
 
 /** Install the new package alongside the legacy one (does NOT uninstall the
