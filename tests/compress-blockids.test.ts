@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { rm, readFileSync } from "node:fs";
+import { rm as rmAsync } from "node:fs/promises";
 import { Value } from "typebox/value";
 import { createAcpExtension } from "../src/index.js";
 
@@ -27,7 +28,11 @@ function userMsg(id: string, text: string) {
 }
 
 async function cleanState() {
-  await rm(`${STATE_FILE}.acp.json`, { force: true });
+  await rmAsync(`${STATE_FILE}.acp.json`, { force: true });
+}
+
+function readState(): any {
+  return JSON.parse(readFileSync(`${STATE_FILE}.acp.json`, "utf8"));
 }
 
 function fakeCtx(entries: any[]) {
@@ -63,6 +68,16 @@ function resultText(res: any): string {
 
 const big = (n: string) => `detailed message ${n} ` + "x".repeat(3000);
 
+function twelveBigEntries() {
+  return [
+    userMsg("e1", big("one")), userMsg("e2", big("two")),
+    userMsg("e3", big("three")),
+    userMsg("e4", big("four")), userMsg("e5", big("five")),
+    userMsg("e6", big("six")), userMsg("e7", big("seven")), userMsg("e8", big("eight")),
+    userMsg("e9", big("nine")), userMsg("e10", big("ten")), userMsg("e11", big("eleven")), userMsg("e12", big("twelve")),
+  ];
+}
+
 test("schema accepts a blockIds-only content entry (startId/endId now optional)", async () => {
   await cleanState();
   const { compressTool } = await setup([userMsg("e1", "hi")]);
@@ -79,14 +94,7 @@ test("schema accepts a blockIds-only content entry (startId/endId now optional)"
 
 test("compress blockIds distills specific non-contiguous blocks into a higher tier", async () => {
   await cleanState();
-  const entries = [
-    userMsg("e1", big("one")), userMsg("e2", big("two")),
-    userMsg("e3", big("three")),
-    userMsg("e4", big("four")), userMsg("e5", big("five")),
-    userMsg("e6", big("six")), userMsg("e7", big("seven")), userMsg("e8", big("eight")),
-    userMsg("e9", big("nine")), userMsg("e10", big("ten")), userMsg("e11", big("eleven")), userMsg("e12", big("twelve")),
-  ];
-  const { compressTool, ctx } = await setup(entries);
+  const { compressTool, ctx } = await setup(twelveBigEntries());
 
   await compressTool.execute("tc1", { content: [{ startId: "m00001", endId: "m00002", summary: "Block one: early setup and initialization of the test session harness." }] }, undefined, undefined, ctx);
   await compressTool.execute("tc2", { content: [{ startId: "m00004", endId: "m00005", summary: "Block two: configuration work and parameter tuning for the pipeline." }] }, undefined, undefined, ctx);
@@ -95,4 +103,24 @@ test("compress blockIds distills specific non-contiguous blocks into a higher ti
   const text = resultText(res);
   assert.match(text, /\d+ block/, "blockIds distillation should create a higher-tier block");
   assert.doesNotMatch(text, /error/i, "blockIds distillation should not error");
+
+  const state = readState();
+  const t2 = state.blocks.filter((b: any) => b.tier === 2 && b.active);
+  assert.equal(t2.length, 1, "exactly one active T2 block created");
+  const b1 = state.blocks.find((b: any) => b.blockId === "b1");
+  const b2 = state.blocks.find((b: any) => b.blockId === "b2");
+  assert.equal(b1.active, false, "source block b1 must be consumed (inactive)");
+  assert.equal(b2.active, false, "source block b2 must be consumed (inactive)");
+  const eff = t2[0].effectiveMessageIds.sort();
+  assert.deepEqual(eff, ["e1", "e2", "e4", "e5"], "T2 effective messages = exactly the two source blocks' messages");
+  assert.ok(!t2[0].effectiveMessageIds.includes("e3"), "intervening entry e3 must stay visible (not folded into T2)");
+  assert.ok(t2[0].directBlockIds.includes("b1") && t2[0].directBlockIds.includes("b2"), "T2 block references its source blocks");
+});
+
+test("boundary-less entry (no startId/endId/blockIds) returns a clear handler error", async () => {
+  await cleanState();
+  const { compressTool, ctx } = await setup(twelveBigEntries());
+  const res = await compressTool.execute("tc1", { content: [{ summary: "an entry with no boundary source whatsoever" }] }, undefined, undefined, ctx);
+  const text = resultText(res);
+  assert.match(text, /needs either startId\+endId or blockIds/i, "handler should reject boundary-less entries with a clear message");
 });

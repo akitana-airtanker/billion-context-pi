@@ -53,6 +53,13 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
+  for (const r of ranges) {
+    const hasBlockIds = r.blockIds && r.blockIds.length > 0;
+    const hasRefs = r.startId && r.endId;
+    if (!hasBlockIds && !hasRefs) {
+      return `Each content entry needs either startId+endId or blockIds. Entry missing both (summary starts: "${r.summary.slice(0, 40)}").`;
+    }
+  }
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
 
