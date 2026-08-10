@@ -227,3 +227,11 @@ test("resolveWaitTimeoutMs passes through values >= 1000 as ms, clamped to [1000
   assert.equal(resolveWaitTimeoutMs(300_000), 300_000);
   assert.equal(resolveWaitTimeoutMs(500_000), 300_000);
 });
+
+test("resolveWaitTimeoutMs boundary: 999 → 300000 (seconds→clamp), 0/negative → 1000 floor", () => {
+  // The <1000 → seconds rescale means 999 becomes 999000 then clamps to the
+  // 300000 max — a sharp edge at the 999/1000 boundary, documented here.
+  assert.equal(resolveWaitTimeoutMs(999), 300_000);
+  assert.equal(resolveWaitTimeoutMs(0), 1_000);
+  assert.equal(resolveWaitTimeoutMs(-5), 1_000);
+});

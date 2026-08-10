@@ -41,7 +41,6 @@ export interface AcpRuntime {
   core: CompressionCore;
   store: SessionStateStore;
   adapter: AdapterConfig;
-  setAdapter(adapter: AdapterConfig): void;
   /** Record that a nudge was already shown for the turn keyed by last user msg
    *  id, so a tier/growth nudge prints at most once per turn instead of on
    *  every context event (pi fires multiple per assistant reply). */
@@ -159,14 +158,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
       return;
     }
-    const key = JSON.stringify(user);
-    if (key === lastUserConfigKey) return;
-    lastUserConfigKey = key;
-    // Re-derive from the factory config (not adapterRef) so a key REMOVED from
-    // acp.json actually reverts, instead of lingering from a prior apply.
-    adapterRef = applyUserConfig(factoryAdapter, user);
-    if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
-    logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
+    try {
+      const key = JSON.stringify(user);
+      if (key === lastUserConfigKey) return;
+      lastUserConfigKey = key;
+      // Re-derive from the factory config (not adapterRef) so a key REMOVED from
+      // acp.json actually reverts, instead of lingering from a prior apply.
+      adapterRef = applyUserConfig(factoryAdapter, user);
+      if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
+      logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
+    } catch (e) {
+      logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
+    }
   }
 
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
@@ -190,5 +193,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };
 }
