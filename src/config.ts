@@ -39,11 +39,20 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** During emergency (usage >= nudge.emergencyThresholdPct, default 80%),
+   *  relax compress.minCompressRange to this value so the model can reclaim
+   *  small fragmented ranges instead of stalling in an
+   *  emergency → "too small" → emergency loop. Default 500 (1/10 of the
+   *  kernel's 5000 default). Set to 0 to disable relaxation (always use the
+   *  base minCompressRange). The relaxation is applied per compress call based
+   *  on the live token count, so non-emergency compress keeps the strict floor. */
+  emergencyMinCompressRange?: number;
   coreOverrides?: Partial<Config>;
 }
 
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
+export const DEFAULT_EMERGENCY_MIN_COMPRESS_RANGE = 500;
 
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;

@@ -4,12 +4,31 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import type { Config } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
+import { DEFAULT_EMERGENCY_MIN_COMPRESS_RANGE } from "./config.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
+}
+
+// Emergency-only relaxation of compress.minCompressRange: breaks the
+// emergency → "too small" → emergency stall. emergencyFloor <= 0 disables it.
+export function resolveEmergencyCompressConfig(
+  config: Config,
+  tokenCount: number,
+  emergencyFloor: number,
+): Config {
+  if (emergencyFloor <= 0) return config;
+  if (config.compress.minCompressRange <= emergencyFloor) return config;
+  const usage = config.modelContextLimit > 0 ? tokenCount / config.modelContextLimit : 0;
+  if (usage < config.nudge.emergencyThresholdPct) return config;
+  return {
+    ...config,
+    compress: { ...config.compress, minCompressRange: emergencyFloor },
+  };
 }
 
 const RangeSpec = Type.Object({
@@ -58,9 +77,11 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const ranges = args.content ?? [];
   if (ranges.length === 0) return "No ranges provided.";
   const { state, coreMessages } = await runtime.stateFor(ctx);
-  const config = runtime.configFor(ctx);
-
   const beforeTokens = estimateTokens(coreMessages, collectCoveredMessageIds(state));
+  const emergencyFloor = runtime.adapter.emergencyMinCompressRange ?? DEFAULT_EMERGENCY_MIN_COMPRESS_RANGE;
+  const realUsage = ctx.getContextUsage?.();
+  const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : beforeTokens;
+  const config = resolveEmergencyCompressConfig(runtime.configFor(ctx), tokenCount, emergencyFloor);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
@@ -102,7 +123,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
 
   logInfo("compress", {
     sid: ctx.sessionManager.getSessionId(),
-    event: "applied",
+    event: blocksCreated > 0 ? "applied" : "rejected",
     ranges: ranges.length,
     blocksCreated,
     tokensCompressed,
@@ -110,6 +131,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     afterTokens,
     warnings: warnings.length,
     errors: errors.length,
+    emergencyMinCompressRange: config.compress.minCompressRange,
     newBlockIds: newBlocks.map((b) => b.blockId),
   });
   if (errors.length > 0) {
