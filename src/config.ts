@@ -45,6 +45,31 @@ export interface AdapterConfig {
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
+export interface ContextUsageReading {
+  tokens?: number | null;
+  percent?: number | null;
+}
+
+/**
+ * Reconstruct the real model window from the provider's usage percent when the
+ * reading is reliable. percent = tokens / realWindow ⇒ realWindow = tokens /
+ * percent. Returns configuredLimit when the reading is absent or out of the
+ * trustworthy 5–100% band, so a modelContextLimit set smaller than the actual
+ * window no longer triggers false emergencies.
+ */
+export function resolveEffectiveContextLimit(
+  configuredLimit: number,
+  realUsage: ContextUsageReading | undefined,
+  tokenCount: number,
+): number {
+  const pct = realUsage?.percent;
+  if (typeof pct !== "number" || pct <= 0.05 || pct > 1 || tokenCount <= 0) {
+    return configuredLimit;
+  }
+  const realWindow = Math.round(tokenCount / pct);
+  return realWindow > 0 ? realWindow : configuredLimit;
+}
+
 export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;

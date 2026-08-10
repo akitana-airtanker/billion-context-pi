@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveEffectiveContextLimit, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
 
@@ -45,4 +45,22 @@ test("resolveConfig ignores a non-positive ACP_MODEL_CONTEXT_LIMIT and falls thr
     if (prev === undefined) delete process.env.ACP_MODEL_CONTEXT_LIMIT;
     else process.env.ACP_MODEL_CONTEXT_LIMIT = prev;
   }
+});
+
+test("resolveEffectiveContextLimit reconstructs the real window from provider percent", () => {
+  // 36072 tokens at 13.26% ⇒ real window ≈ 272000 (the acp.log scenario).
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: 0.1326 }, 36_072), 272_036);
+  assert.equal(resolveEffectiveContextLimit(80_000, { tokens: 70_000, percent: 0.2574 }, 70_000), 271_950);
+});
+
+test("resolveEffectiveContextLimit falls back to configured when reading is unreliable", () => {
+  assert.equal(resolveEffectiveContextLimit(80_000, undefined, 36_072), 80_000, "no reading");
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: null }, 36_072), 80_000, "null percent");
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: 0.03 }, 36_072), 80_000, "percent below 5% band");
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: 1.5 }, 220_000), 80_000, "percent above 100% (overflow, skip)");
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: 0.5 }, 0), 80_000, "zero tokenCount");
+});
+
+test("resolveEffectiveContextLimit accepts exactly 100%", () => {
+  assert.equal(resolveEffectiveContextLimit(80_000, { percent: 1 }, 200_000), 200_000);
 });

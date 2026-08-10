@@ -363,14 +363,19 @@ test("coreOutToAgentMessages returns original unchanged when no ref tag is prese
   assert.equal(out[0], original, "un-tagged message returned by reference, untouched");
 });
 
-test("coreOutToAgentMessages filters out synthetic summary messages (compress-as-anchor)", () => {
+test("coreOutToAgentMessages emits synthetic summary messages as user text (no amnesia)", () => {
   const originalById = new Map<string, SessionMessageEntry["message"]>();
   const coreOut: CoreMessage[] = [
     { id: "acp_summary_b0", role: "system", contentType: "text", text: "[Compressed conversation section]\nbody" },
   ];
 
   const out = coreOutToAgentMessages(coreOut, originalById);
-  assert.equal(out.length, 0, "synthetic summary messages should be filtered out");
+  assert.equal(out.length, 1, "synthetic summary is emitted, not dropped");
+  const msg = out[0] as { role: string; content: Array<{ type: string; text?: string }> };
+  assert.equal(msg.role, "user", "summary projected as user text");
+  const text = Array.isArray(msg.content) ? (msg.content.find((b) => b.type === "text")?.text ?? "") : "";
+  assert.ok(text.includes("[Compressed conversation section]"), "summary header retained");
+  assert.ok(text.includes("body"), "summary body retained");
 });
 
 test("coreOutToAgentMessages reconstructs parallel tool-call assistant message from split core messages", () => {

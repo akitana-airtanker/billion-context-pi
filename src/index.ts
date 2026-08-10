@@ -7,6 +7,7 @@ import type {
 import type { CoreMessage, NudgeDecision, CompressionBlock } from "acp-kernel";
 import { renderNudgeText } from "acp-kernel";
 import type { AdapterConfig } from "./config.js";
+import { resolveEffectiveContextLimit } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -115,6 +116,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const realUsage = ctx.getContextUsage?.();
       const estimated = estimateTokens(coreMessages, coveredIds);
       const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : estimated;
+      const effectiveLimit = resolveEffectiveContextLimit(config.modelContextLimit, realUsage, tokenCount);
+      const effectiveConfig = effectiveLimit !== config.modelContextLimit
+        ? { ...config, modelContextLimit: effectiveLimit }
+        : config;
 
       debug.event("context-in", {
         sid,
@@ -125,12 +130,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         estimatedTokens: estimated,
         realTokens: realUsage?.tokens ?? null,
         realPercent: realUsage?.percent ?? null,
-        limit: config.modelContextLimit,
+        limit: effectiveConfig.modelContextLimit,
         blocksBefore: state.blocks.length,
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
-      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      const turn = runtime.core.processTurn({ messages: coreMessages, state, config: effectiveConfig, tokenCount });
       await runtime.save(turn.state, ctx);
 
       logInfo("turn", {
@@ -138,8 +143,8 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         inMsgs: coreMessages.length,
         outMsgs: turn.messages.length,
         tokens: tokenCount,
-        pct: realUsage?.percent ?? (config.modelContextLimit > 0 ? Math.round((tokenCount / config.modelContextLimit) * 100) : null),
-        limit: config.modelContextLimit,
+        pct: realUsage?.percent ?? (effectiveConfig.modelContextLimit > 0 ? Math.round((tokenCount / effectiveConfig.modelContextLimit) * 100) : null),
+        limit: effectiveConfig.modelContextLimit,
         nudge: turn.nudge?.shouldInject ? (turn.nudge.breakdown?.emergencyOverride === 1 ? "emergency" : "active") : "idle",
         nudgeReason: turn.nudge?.reason ?? null,
         blocks: turn.state.blocks.length,

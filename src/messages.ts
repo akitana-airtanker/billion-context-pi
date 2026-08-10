@@ -139,7 +139,12 @@ export function coreOutToAgentMessages(
   const emittedSplit = new Set<string>();
 
   for (const core of coreOut) {
-    if (core.id.startsWith("acp_summary_")) continue;
+    if (core.id.startsWith("acp_summary_")) {
+      // Kernel prune replaced covered msgs with this summary; emit it (as user
+      // text) — dropping it caused amnesia for compressed sections + re-fetch.
+      out.push({ role: "user", content: [{ type: "text", text: core.text ?? "" }] } as AgentMessage);
+      continue;
+    }
 
     const hashIdx = core.id.indexOf("#");
     if (hashIdx < 0) {
