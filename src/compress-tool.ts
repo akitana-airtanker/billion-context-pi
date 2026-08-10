@@ -5,7 +5,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
-import { debug, logError, logInfo, logThrow } from "./log.js";
+import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds } from "./tokens.js";
 
 function formatK(n: number): string {
@@ -83,7 +83,11 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   await runtime.save(applied.state, ctx);
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
 
-  const afterTokens = Math.max(0, beforeTokens - tokensCompressed);
+  // Re-measure (not subtract): beforeTokens excludes covered msgs but
+  // tokensCompressed sums raw range sizes — different denominators, so a
+  // subtraction can go negative and clamp to 0 when most context is compressed.
+  const afterTokens = estimateTokens(coreMessages, collectCoveredMessageIds(applied.state));
+  const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
   const newBlocks = applied.state.blocks.slice(-blocksCreated);
   debug.event("compress-out", {
@@ -116,10 +120,10 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
   }
   if (warnings.length > 0) {
-    logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "warnings", count: warnings.length, warnings: warnings.slice(0, 5) });
   }
 
-  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(tokensCompressed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");

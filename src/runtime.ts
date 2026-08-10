@@ -9,7 +9,8 @@ import {
 import { resolveConfig, type AdapterConfig } from "./config.js";
 import { entriesToCoreMessages } from "./messages.js";
 import { SessionStateStore } from "./state.js";
-import { logInfo, logWarn } from "./log.js";
+import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so the
@@ -51,6 +52,10 @@ export interface AcpRuntime {
   clearNudgeTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
+  /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
+   *  config when the contents change. Cheap no-op when unchanged. Called at
+   *  session_start and on every context event so config edits apply live. */
+  reloadConfig(cwd: string): Promise<void>;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
   save(state: CompressionState, ctx: ExtensionContext): Promise<void>;
   acquireLock(sid: string): Promise<() => void>;
@@ -114,7 +119,9 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const core = createCore({ countTokens: defaultCountTokens });
   const store = new SessionStateStore();
   const locks = new Map<string, Promise<void>>();
+  const factoryAdapter = adapter;
   let adapterRef = adapter;
+  let lastUserConfigKey: string | undefined;
   const nudgeShownTurns = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -144,6 +151,24 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx));
   }
 
+  async function reloadConfig(cwd: string): Promise<void> {
+    let user;
+    try {
+      user = await loadUserConfig(cwd);
+    } catch (e) {
+      logWarn("runtime", { event: "config-reload-failed", error: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    const key = JSON.stringify(user);
+    if (key === lastUserConfigKey) return;
+    lastUserConfigKey = key;
+    // Re-derive from the factory config (not adapterRef) so a key REMOVED from
+    // acp.json actually reverts, instead of lingering from a prior apply.
+    adapterRef = applyUserConfig(factoryAdapter, user);
+    if (adapterRef.debug !== undefined) setDebugEnabled(adapterRef.debug);
+    logInfo("runtime", { event: "config-reloaded", limit: adapterRef.modelContextLimit ?? null });
+  }
+
   async function stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]) {
     const sm = ctx.sessionManager;
     const state = await store.load(sm.getSessionFile() ?? undefined, sm.getSessionId());
@@ -165,5 +190,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock };
 }

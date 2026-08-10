@@ -18,11 +18,11 @@ import { coreOutToAgentMessages } from "./messages.js";
 import { ACP_SYSTEM_PROMPT, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
-import { debug, setDebugEnabled, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
+import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import { runSetupAndNotify } from "./setup-subagent-tools.js";
-import { loadUserConfig, applyUserConfig } from "./user-config.js";
+
 import { formatSystemPromptForEvent } from "./compat.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -66,9 +66,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null });
     try {
-      const user = await loadUserConfig(ctx.cwd);
-      runtime.setAdapter(applyUserConfig(runtime.adapter, user));
-      if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+      await runtime.reloadConfig(ctx.cwd);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
@@ -104,6 +102,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
+      await runtime.reloadConfig(ctx.cwd);
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const config = runtime.configFor(ctx);
       const coveredIds = collectCoveredMessageIds(state);

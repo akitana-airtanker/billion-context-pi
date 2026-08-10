@@ -1,5 +1,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
 import { createAcpExtension } from "../src/index.js";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
@@ -230,4 +233,43 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
   // Core ACP prompt is still present — only the delegate section is dropped.
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
+
+// ─── ISSUE-9: modelContextLimit changes in <cwd>/.pi/acp.json hot-reload ──
+
+test("modelContextLimit changes in .pi/acp.json are picked up on the next context event", async () => {
+  (globalThis as any).CURRENT_VERSION = (globalThis as any).CURRENT_VERSION ?? "test";
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "acp-hotreload-"));
+  const piDir = path.join(tmp, ".pi");
+  fs.mkdirSync(piDir, { recursive: true });
+  const acpJson = path.join(piDir, "acp.json");
+  fs.writeFileSync(acpJson, JSON.stringify({ modelContextLimit: 100_000 }));
+
+  try {
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+
+    function ctxWithCwd() {
+      return { ...fakeCtx([], path.join(tmp, "state.json")), cwd: tmp };
+    }
+    async function acpStatus(): Promise<string> {
+      let captured = "";
+      const ctx = {
+        ...fakeCtx([], path.join(tmp, "state.json")),
+        cwd: tmp,
+        ui: { notify: (s: string) => { captured = s; }, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
+      };
+      await api.commands.get("acp").handler([], ctx);
+      return captured;
+    }
+
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, ctxWithCwd());
+    assert.ok((await acpStatus()).includes("100.0K"), "initial limit reflects acp.json modelContextLimit=100000");
+
+    fs.writeFileSync(acpJson, JSON.stringify({ modelContextLimit: 250_000 }));
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, ctxWithCwd());
+    assert.ok((await acpStatus()).includes("250.0K"), "rewritten modelContextLimit=250000 hot-reloaded on next context event");
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

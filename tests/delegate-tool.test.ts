@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, injectedWaitMessage } from "../src/delegate-tool.js";
+import { buildChildArgs, injectedWaitMessage, resolveWaitTimeoutMs } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -207,4 +207,23 @@ test("buildChildArgs keeps -p for sync delegates even on pi", async () => {
   assert.equal(isAsync, false);
   assert.equal(useJsonStream, false);
   assert.equal(cliArgs[0], "-p");
+});
+
+// ─── resolveWaitTimeoutMs: small values treated as seconds (ISSUE-1) ──────
+
+test("resolveWaitTimeoutMs returns the default when undefined", () => {
+  assert.equal(resolveWaitTimeoutMs(undefined), 10_000);
+});
+
+test("resolveWaitTimeoutMs rescales sub-1000 values as seconds", () => {
+  assert.equal(resolveWaitTimeoutMs(180), 180_000);
+  assert.equal(resolveWaitTimeoutMs(60), 60_000);
+  assert.equal(resolveWaitTimeoutMs(1), 1_000);
+});
+
+test("resolveWaitTimeoutMs passes through values >= 1000 as ms, clamped to [1000, 300000]", () => {
+  assert.equal(resolveWaitTimeoutMs(1_000), 1_000);
+  assert.equal(resolveWaitTimeoutMs(45_000), 45_000);
+  assert.equal(resolveWaitTimeoutMs(300_000), 300_000);
+  assert.equal(resolveWaitTimeoutMs(500_000), 300_000);
 });
