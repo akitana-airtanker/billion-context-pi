@@ -16,7 +16,7 @@
  */
 
 import type { ExtensionContext, SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { blockDocs, messageDocs, type SearchDoc, type MessageInput, type MessageRole } from "acp-kernel";
+import { blockDocs, defaultCountTokens, messageDocs, type SearchDoc, type MessageInput, type MessageRole } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
 import type { CompressionState } from "acp-kernel";
 
@@ -41,10 +41,10 @@ function buildMessageOwnerMap(state: CompressionState): Map<string, string> {
 }
 
 function estimateTokens(text: string): number {
-    if (typeof text !== "string" || !text) return 0;
-    const cjk = text.match(/[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g);
-    const cjkCount = cjk?.length ?? 0;
-    return cjkCount + Math.ceil((text.length - cjkCount) / 4);
+    // Delegate to the kernel's CJK-aware counter rather than keeping a local
+    // regex copy in sync. Callers coalesce text to a non-empty string, and
+    // defaultCountTokens also handles "" → 0.
+    return defaultCountTokens(text);
 }
 
 function toRole(entry: SessionMessageEntry): MessageRole | null {

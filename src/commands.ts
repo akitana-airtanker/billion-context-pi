@@ -87,9 +87,10 @@ function bar(value: number, total: number, width: number = 20): string {
 async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): Promise<string> {
   const { state, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
-  // Use pi's real context usage (anchored on provider usage) instead of a
-  // chars/4 estimate — matches the footer percentage and the nudge decision
-  // the context transform computes.
+  // Use pi's real context usage (anchored on provider usage) instead of the
+  // kernel's defaultCountTokens heuristic (chars/4 for non-CJK, 1:1 for CJK)
+  // — matches the footer percentage and the nudge decision the context
+  // transform computes.
   const realUsage = ctx.getContextUsage?.();
   const tokenCount = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n"));
 
@@ -99,10 +100,11 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const limit = config.modelContextLimit;
   // displayTotal must reflect the REAL context size (what the footer shows),
   // not just the sum of message-text categories. contextBreakdown only
-  // classifies message text via chars/4 and never sees pi's system prompt
-  // or tool schemas, so summing its fields undercounts. Split the gap into
-  // the real system prompt (measured) and the rest (tool schemas + the
-  // inevitable chars/4-vs-real-tokenizer drift).
+  // classifies message text via defaultCountTokens (chars/4 for non-CJK, 1:1
+  // for CJK) and never sees pi's system prompt or tool schemas, so summing
+  // its fields undercounts. Split the gap into the real system prompt
+  // (measured) and the rest (tool schemas + the inevitable heuristic-vs-
+  // real-tokenizer drift).
   const classified = bd ? bd.system + bd.tool + bd.summaries + bd.code + bd.text : 0;
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
