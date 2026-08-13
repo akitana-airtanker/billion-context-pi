@@ -15,6 +15,7 @@ export interface UserAcpConfig {
   modelContextLimit?: number;
   toolBashDefaultTimeout?: number;
   toolOutputMaxBytes?: number;
+  toolOutputClean?: boolean;
   delegate?: boolean | DelegateConfig;
   compress?: CompressConfig;
   displayUsage?: "merged" | "separate";
@@ -52,7 +53,7 @@ function join(... parts: string[]): string {
 
 const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
-  "toolBashDefaultTimeout", "toolOutputMaxBytes",
+  "toolBashDefaultTimeout", "toolOutputMaxBytes", "toolOutputClean",
   "delegate", "compress", "displayUsage",
   "prompts", "acknowledgePromptsRisk",
 ]);

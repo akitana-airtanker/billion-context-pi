@@ -66,6 +66,10 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** 工具输出清洗（去重 + 去噪），仅作用于 bash 工具结果。默认 true。
+   *  规则保守：只折叠无缩进、非代码锚的重复行（日志/警告模板），
+   *  代码类输出（缩进行、`{};` 锚行）完全豁免。设为 false 关闭。 */
+  toolOutputClean?: boolean;
   /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
    *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
    *  object. Default: enabled. */
@@ -89,6 +93,7 @@ export interface AdapterConfig {
 
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
+export const DEFAULT_TOOL_OUTPUT_CLEAN = true;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
  *  and the legacy flat `displayUsage` alias. */
