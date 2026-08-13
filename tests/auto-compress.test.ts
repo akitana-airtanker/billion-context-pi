@@ -30,6 +30,19 @@ function makeRange(startRef: string, endRef: string, tokens: number) {
   return { startRef, endRef, tokens, dangerous: false };
 }
 
+function withHome<T>(dir: string, fn: () => T): T {
+  const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
+  process.env.HOME = dir;
+  process.env.USERPROFILE = dir;
+  try {
+    return fn();
+  } finally {
+    process.env.HOME = prevHome;
+    process.env.USERPROFILE = prevProfile;
+  }
+}
+
 test("parseSummary extracts summary from plain JSON object", () => {
   assert.equal(parseSummary('{"summary":"hello world"}'), "hello world");
 });
@@ -82,40 +95,31 @@ test("resolveCompressModel: nothing usable → null", () => {
 
 test("readCompressModel returns null when acp.json absent (graceful)", () => {
   const dir = mkdtempSync(join(tmpdir(), "acp-compact-"));
-  const prev = process.env.HOME;
-  process.env.HOME = dir;
   try {
-    assert.equal(readCompressModel(), null);
+    withHome(dir, () => assert.equal(readCompressModel(), null));
   } finally {
-    process.env.HOME = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("readCompressModel reads provider:modelId from acp.json", () => {
   const dir = mkdtempSync(join(tmpdir(), "acp-compact-"));
-  const prev = process.env.HOME;
-  process.env.HOME = dir;
   try {
     mkdirSync(join(dir, CONFIG_DIR_NAME), { recursive: true });
     writeFileSync(join(dir, CONFIG_DIR_NAME, "acp.json"), JSON.stringify({ compressModel: "openai:gpt-4o" }));
-    assert.equal(readCompressModel(), "openai:gpt-4o");
+    withHome(dir, () => assert.equal(readCompressModel(), "openai:gpt-4o"));
   } finally {
-    process.env.HOME = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
 test("readCompressModel ignores empty / non-string compressModel", () => {
   const dir = mkdtempSync(join(tmpdir(), "acp-compact-"));
-  const prev = process.env.HOME;
-  process.env.HOME = dir;
   try {
     mkdirSync(join(dir, CONFIG_DIR_NAME), { recursive: true });
     writeFileSync(join(dir, CONFIG_DIR_NAME, "acp.json"), JSON.stringify({ compressModel: "" }));
-    assert.equal(readCompressModel(), null);
+    withHome(dir, () => assert.equal(readCompressModel(), null));
   } finally {
-    process.env.HOME = prev;
     rmSync(dir, { recursive: true, force: true });
   }
 });
