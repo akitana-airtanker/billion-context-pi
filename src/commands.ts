@@ -4,6 +4,7 @@ import { defaultCountTokens, parseBlockIdArg, collectBlockContent, formatRanges 
 import { getSystemPromptText } from "./compat.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { formatCompactTokens } from "./footer-status.js";
+import { t } from "./i18n.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -14,56 +15,56 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
     {
       name: "acp",
       options: {
-        description: "Show ACP context usage, token breakdown, and compression status.",
+        description: t("acp.description"),
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
       },
     },
     {
       name: "acp-status",
       options: {
-        description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
+        description: t("acp-status.description"),
         handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
       },
     },
     {
       name: "acp-decompress",
       options: {
-        description: "Restore a compressed block's content (shown here, block stays folded). Usage: /acp-decompress b3",
+        description: t("acp-decompress.description"),
         handler: async (args, ctx) => {
           const blockId = parseBlockIdArg(args);
           if (!blockId) {
-            ctx.ui.notify('Usage: /acp-decompress <blockId> (e.g. "b3")');
+            ctx.ui.notify(t("decompress.usage"));
             return;
           }
           const { state, coreMessages } = await runtime.stateFor(ctx);
           const block = state.blocks.find((b) => b.blockId === blockId);
           if (!block) {
-            ctx.ui.notify(`Block ${blockId} not found.`);
+            ctx.ui.notify(t("decompress.not-found", { id: blockId }));
             return;
           }
           const { text, count } = collectBlockContent(state, block, coreMessages, { full: false });
           if (count === 0) {
-            ctx.ui.notify(`Block ${blockId} has no restorable message content.`);
+            ctx.ui.notify(t("decompress.empty", { id: blockId }));
             return;
           }
-          ctx.ui.notify(`Block ${blockId} (${count} items):\n\n${text}`);
+          ctx.ui.notify(t("decompress.result", { id: blockId, count, text }));
         },
       },
     },
     {
       name: "acp-search",
       options: {
-        description: "Search compressed block summaries. Usage: /acp-search auth token",
+        description: t("acp-search.description"),
         handler: async (args, ctx) => {
           const query = args.trim();
           if (!query) {
-            ctx.ui.notify("Usage: /acp-search <query>");
+            ctx.ui.notify(t("search.usage"));
             return;
           }
           const { state } = await runtime.stateFor(ctx);
           const hits = runtime.core.search(query, state);
           if (hits.length === 0) {
-            ctx.ui.notify("No matching blocks.");
+            ctx.ui.notify(t("search.no-match"));
             return;
           }
           const lines = hits.map((b) => `[${b.blockId}] (t${b.tier}) ${b.topic ?? ""}`.trim());
@@ -121,16 +122,16 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   lines.push("╰─────────────────────────────────────────────╯");
   if (versionStr) lines.push(versionStr);
   lines.push("");
-  lines.push(`Context: ${displayPct}% (${fmtTokens(displayTotal)} / ${fmtTokens(limit)})`);
+  lines.push(t("context", { pct: displayPct, used: fmtTokens(displayTotal), limit: fmtTokens(limit) }));
 
   if (nudge && bd) {
     const growth = bd.growth;
     if (growth > 0 && displayTotal > 0) {
-      lines.push(`Growth: +${fmtTokens(growth)} since last nudge`);
+      lines.push(t("growth", { growth: fmtTokens(growth) }));
     }
     if (displayTotal > 0) {
       lines.push("");
-      lines.push("Token Breakdown:");
+      lines.push(t("breakdown"));
 
       const categories: Array<{ label: string; value: number }> = [
         { label: "Tool", value: bd.tool },
@@ -155,9 +156,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   if (nudge) {
     if (nudge.shouldInject) {
       const tierInfo = nudge.tier ? ` [T${nudge.tier} distillation]` : "";
-      lines.push(`Nudge: ACTIVE${tierInfo} — ${nudge.reason}`);
+      lines.push(t("nudge.active", { tier: tierInfo, reason: nudge.reason }));
     } else {
-      lines.push(`Nudge: idle — ${nudge.reason}`);
+      lines.push(t("nudge.idle", { reason: nudge.reason }));
     }
   }
 
@@ -170,7 +171,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
 
   if (activeBlocksList.length > 0) {
     lines.push("");
-    lines.push(`Blocks: ${activeBlocksList.length} active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
+    lines.push(t("blocks.active", { active: activeBlocksList.length, total: totalBlocksList.length, tokens: fmtTokens(state.stats.tokensCompressed) }));
     for (const b of activeBlocksList) {
       const topic = b.topic ? `: ${b.topic}` : "";
       const summaryTok = defaultCountTokens(b.summary || "");
@@ -179,10 +180,10 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     }
   } else if (totalBlocksList.length > 0) {
     lines.push("");
-    lines.push(`Blocks: 0 active / ${totalBlocksList.length} total (${fmtTokens(state.stats.tokensCompressed)} tokens compressed)`);
+    lines.push(t("blocks.active", { active: 0, total: totalBlocksList.length, tokens: fmtTokens(state.stats.tokensCompressed) }));
   } else {
     lines.push("");
-    lines.push("Blocks: none (nothing compressed yet)");
+    lines.push(t("blocks.none"));
   }
 
   lines.push("");
@@ -195,7 +196,7 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
     lines.push(`Tokens: ${delegateUsage.input.toLocaleString()} in, ${delegateUsage.output.toLocaleString()} out (${delegateUsage.totalTokens.toLocaleString()} total)${costStr}`);
   }
   lines.push("");
-  lines.push("Tag visibility: tags injected to LLM only (deep copy), not persisted in session, not shown in terminal.");
+  lines.push(t("tag-visibility"));
 
   return lines.join("\n");
 }

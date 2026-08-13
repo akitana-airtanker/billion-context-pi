@@ -84,6 +84,9 @@ export interface AdapterConfig {
    *  replacing the kernel's tuned compression rules may reduce summary quality
    *  (lost paths/signatures/decisions → worse retrieval). */
   acknowledgePromptsRisk?: boolean;
+  /** 界面语言（slash 命令输出 / 状态报告）："zh" | "en"。缺省按系统 LANG 检测。
+   *  仅影响展示层文本；面向模型的提示（system prompt / nudge）始终为英文。 */
+  language?: "zh" | "en";
   coreOverrides?: Partial<Config>;
 }
 

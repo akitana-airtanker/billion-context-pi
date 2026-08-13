@@ -20,6 +20,7 @@ export interface UserAcpConfig {
   displayUsage?: "merged" | "separate";
   prompts?: Partial<Prompts>;
   acknowledgePromptsRisk?: boolean;
+  language?: "zh" | "en";
 }
 
 /** Read global + project acp.json, project overrides global. Returns {} on any
@@ -54,7 +55,7 @@ const KNOWN = new Set([
   "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage",
-  "prompts", "acknowledgePromptsRisk",
+  "prompts", "acknowledgePromptsRisk", "language",
 ]);
 
 function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {

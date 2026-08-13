@@ -14,6 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
+import { setLocale } from "./i18n.js";
 import { coreOutToAgentMessages } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
@@ -41,10 +42,16 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
-    for (const { name, options } of makeCommands(runtime)) {
-      pi.registerCommand(name, options);
-    }
+    registerCommands(pi, runtime);
   };
+}
+
+/** Register (or re-register) the ACP slash commands. Re-callable so command
+ *  descriptions pick up the configured locale after acp.json is loaded. */
+function registerCommands(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  for (const { name, options } of makeCommands(runtime)) {
+    pi.registerCommand(name, options);
+  }
 }
 
 export default createAcpExtension();
@@ -72,6 +79,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
       setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+      setLocale(runtime.adapter.language);
+      registerCommands(pi, runtime);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
