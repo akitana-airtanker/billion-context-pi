@@ -15,6 +15,7 @@ import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages } from "./messages.js";
+import { summarizeRange, selectRangeSpan } from "./auto-compress.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -32,7 +33,7 @@ declare const CURRENT_VERSION: string;
 export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
   return (pi: ExtensionAPI) => {
     const runtime = createRuntime(adapter);
-    wireCompactionDisable(pi);
+    wireCompactionDisable(pi, runtime);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -49,10 +50,80 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 
 export default createAcpExtension();
 
-// ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
-// opencode-acp requiring opencode's compaction.auto = false).
-function wireCompactionDisable(pi: ExtensionAPI): void {
-  pi.on("session_before_compact", () => ({ cancel: true }));
+// ACP owns compression. On `/compact` we intercept Pi's native compaction and
+// instead run the message range through the kernel's compression pipeline:
+// pick a compressible span, summarize it with a model (explicit `compressModel`
+// or the session model), and applyCompression. We then hand the summary back
+// to Pi as the compaction result so Pi stores it. On any failure we return
+// undefined so Pi falls back to its own compaction rather than losing context.
+function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("session_before_compact", async (event, ctx) => {
+    let release: (() => void) | undefined;
+    try {
+      const sid = ctx.sessionManager?.getSessionId?.() ?? "";
+      release = await runtime.acquireLock(sid);
+      const { state, coreMessages } = await runtime.stateFor(ctx);
+      const config = runtime.configFor(ctx);
+      const coveredIds = collectCoveredMessageIds(state);
+      const tokenCount = estimateTokens(coreMessages, coveredIds);
+
+      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      await runtime.save(turn.state, ctx);
+
+      const ranges = (turn.nudge?.compressibleRanges ?? []).filter((r) => !r.dangerous);
+      if (ranges.length === 0) return undefined;
+
+      const span = selectRangeSpan(ranges, turn.messages, turn.state, config.compress.minCompressRange ?? 5000);
+      if (!span) return undefined;
+
+      ctx.ui?.notify?.(`ACP: compressing ~${span.tokens} tokens…`, "info");
+      const result = await summarizeRange(ctx, turn.messages, turn.state, span.startRef, span.endRef, runtime.prompts);
+      if (!result) {
+        ctx.ui?.notify?.("ACP: compression fell back to Pi native compaction", "warning");
+        return undefined;
+      }
+      const { summary, model } = result;
+
+      const applied = runtime.core.applyCompression({
+        ranges: [{ startRef: span.startRef, endRef: span.endRef, summary }],
+        messages: turn.messages,
+        state: turn.state,
+        config,
+      });
+      const errors = applied.result.errors ?? [];
+      if (errors.length > 0) {
+        logWarn("compact", { sid, event: "rejected", span: `${span.startRef}..${span.endRef}`, model, errors });
+        return undefined;
+      }
+      await runtime.save(applied.state, ctx);
+
+      logInfo("compact", {
+        sid,
+        event: "acp-compaction",
+        span: `${span.startRef}..${span.endRef}`,
+        tokens: span.tokens,
+        model,
+        blocksCreated: applied.result.blocksCreated,
+        reason: event.reason,
+      });
+      debug.event("compact-acp", { sid, span: `${span.startRef}..${span.endRef}`, tokens: span.tokens, model, reason: event.reason });
+
+      ctx.ui?.notify?.(`ACP: compressed ~${span.tokens} tokens via ${model}`, "info");
+
+      return {
+        compaction: {
+          summary,
+          firstKeptEntryId: event.preparation.firstKeptEntryId,
+          tokensBefore: event.preparation.tokensBefore,
+        },
+      };
+    } catch (e) {
+      logThrow("compact", e, { sid: ctx.sessionManager?.getSessionId?.() ?? "" });
+      return undefined;
+    } finally {
+      release?.();
+    }
+  });
 }
 
 // (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget

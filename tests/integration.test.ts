@@ -57,11 +57,12 @@ test("factory registers the compress tool and 4 flat commands", () => {
   assert.ok(handlers.has("before_agent_start"), "system-prompt wired");
 });
 
-test("session_before_compact cancels Pi's auto-compaction", () => {
+test("session_before_compact falls back to Pi native compaction on failure", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension()(api as any);
-  const result = handlers.get("session_before_compact")![0]!({}, {});
-  assert.deepEqual(result, { cancel: true });
+  const handler = handlers.get("session_before_compact")![0]!;
+  const result = await handler({ preparation: { firstKeptEntryId: "x", tokensBefore: 100 } }, {} as any);
+  assert.equal(result, undefined, "no usable state → undefined → Pi falls back to native compaction");
 });
 
 test("before_agent_start appends the ACP system prompt", () => {
