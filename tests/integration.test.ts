@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAcpExtension } from "../src/index.js";
+import { createRuntime } from "../src/runtime.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 // Mock Pi's ExtensionAPI — captures the event handlers the factory registers,
@@ -713,4 +714,61 @@ test("delegate:false omits the ACP_DELEGATE NOTIFICATIONS section from the syste
   assert.ok(!result.systemPrompt.includes("ACP_DELEGATE NOTIFICATIONS"), "delegate section omitted when delegate:false");
   // Core ACP prompt is still present — only the delegate section is dropped.
   assert.ok(result.systemPrompt.includes("ACP TAGS"), "core ACP prompt still present when delegate disabled");
+});
+
+function toolResultMsg(id: string, text: string) {
+  return {
+    type: "message",
+    id,
+    parentId: null,
+    timestamp: "",
+    message: { role: "toolResult", content: [{ type: "text", text }], toolName: "bash", toolCallId: `call-${id}`, timestamp: Date.now() },
+  };
+}
+
+test("context handler clamps a giant tool result to 25% of the context limit (issue #38)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const giant = "x".repeat(300_000);
+  const entries = [userMsg("e1", "first"), toolResultMsg("e2", giant), userMsg("e3", "last")];
+  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-giant-clamp.session.json");
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ ...(e as any).message })) }, ctx);
+  const toolOut = result.messages.find((m: any) => m.role === "toolResult") as any;
+  const text = ((toolOut.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
+  assert.ok(text.includes("ACP guard"), "giant tool result must carry the clamp note");
+  assert.ok(text.length < 200_000, `clamped text must stay under 25% of the limit, got ${text.length}`);
+  const originalText = ((entries[1]!.message as any).content as any[]).find((b: any) => b.type === "text")!.text;
+  assert.equal(originalText.length, 300_000, "session-log original must never be mutated");
+});
+
+test("emergency nudge injects at most once per minute (issue #38 retry-storm throttle)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 50_000 })(api as any);
+  const big = "y".repeat(90_000);
+  const entries = [
+    userMsg("e1", "go"),
+    { type: "message", id: "e2", parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "text", text: big }], timestamp: Date.now() } },
+    toolResultMsg("e3", big),
+    { type: "message", id: "e4", parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "text", text: big }], timestamp: Date.now() } },
+    userMsg("e5", "and again"),
+  ];
+  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-emergency-throttle.session.json");
+  const msgs = entries.map((e) => ({ ...(e as any).message }));
+
+  const first = await handlers.get("context")![0]!({ type: "context", messages: msgs }, ctx);
+  const second = await handlers.get("context")![0]!({ type: "context", messages: msgs }, ctx);
+  assert.equal(first.messages.length - second.messages.length, 1, `first fire injects the emergency nudge (${first.messages.length}), immediate second fire is throttled (${second.messages.length})`);
+});
+
+test("runtime emergency throttle and giant-clamp dedup track state", () => {
+  const rt = createRuntime({});
+  assert.equal(rt.emergencyThrottled(), false);
+  rt.markEmergencyShown();
+  assert.equal(rt.emergencyThrottled(), true);
+  rt.clearNudgeTracking();
+  assert.equal(rt.emergencyThrottled(), false);
+  assert.equal(rt.giantClampSeen("k"), false);
+  rt.markGiantClampSeen("k");
+  assert.equal(rt.giantClampSeen("k"), true);
 });

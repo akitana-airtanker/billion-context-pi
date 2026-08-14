@@ -4,7 +4,7 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
-import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
+import type { CoreMessage, NudgeDecision, CompressionBlock, Config, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
@@ -14,7 +14,7 @@ import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
 import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
-import { coreOutToAgentMessages } from "./messages.js";
+import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
@@ -171,9 +171,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       activeAfter: turn.state.blocks.filter((b) => b.active).length,
     });
 
-    const originalById = collectOriginals(entries);
-    const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-    const debugOn = debug.enabled;
+      const originalById = collectOriginals(entries);
+      const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
+      clampGiantToolResults(rebuilt, config, runtime, sid);
+      const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:
@@ -185,19 +186,24 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       //     text via ctx.ui.notify so the user can observe what is being
       //     injected while debugging. The model never sees terminal output.
       // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
-      // overflow warning always reaches the model. Other nudges inject at most
-      // once per turn: pi fires the context event multiple times per assistant
-      // reply (streaming/tool loop), and without this gate the same nudge
-      // would be appended on every event.
+      // overflow warning always reaches the model, but are rate-limited to one
+      // per minute: when a request fails on overflow, pi retries and every
+      // retry re-fires the context event — injecting a nudge each time only
+      // grows the oversized request further (issue #38 death loop).
+      // Other nudges inject at most once per turn: pi fires the context event
+      // multiple times per assistant reply (streaming/tool loop), and without
+      // this gate the same nudge would be appended on every event.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       const turnKey = lastUserMessageId(entries) ?? sid;
-      const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
+      const emergencySuppressed = emergency && runtime.emergencyThrottled();
+      const alreadyShown = (!emergency && runtime.nudgeShownFor(turnKey)) || emergencySuppressed;
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
+          runtime.markEmergencyShown();
           logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
         }
         if (debugOn && ctx.hasUI) {
@@ -206,7 +212,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         if (!emergency) runtime.markNudgeShown(turnKey);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
-        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, emergency, reason: emergencySuppressed ? "emergency-throttle" : turn.nudge.reason });
       }
     }
 
@@ -255,6 +261,41 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
     }
   }
   return map;
+}
+
+// Issue #38 death-loop defense: a single oversized tool result (observed
+// ~870K tokens) can push an otherwise healthy request far past the real
+// provider window before the kernel's usage-gated emergency truncation ever
+// engages. Unconditionally clamp any toolResult whose text exceeds 25% of
+// the context limit. The session log keeps the full text; only this LLM
+// request sees the clamped copy.
+function clampGiantToolResults(
+  messages: AgentMessage[],
+  config: Config,
+  runtime: AcpRuntime,
+  sid: string,
+): void {
+  const limit = config.modelContextLimit;
+  if (!(limit > 0)) return;
+  const maxChars = Math.floor(limit * 0.25) * 4;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    if (message.role !== "toolResult") continue;
+    const text = extractText(message.content);
+    if (text.length <= maxChars) continue;
+    const headChars = Math.floor(maxChars * 0.6);
+    const tailChars = Math.floor(maxChars * 0.2);
+    const note = `\n\n[ACP guard: tool output clamped from ${text.length} to ${headChars + tailChars} chars — a single result exceeded 25% of the context limit; the full text is preserved in the session log]\n\n`;
+    const clamped = `${text.slice(0, headChars)}${note}${text.slice(text.length - tailChars)}`;
+    if (!Array.isArray(message.content)) continue;
+    const kept = message.content.filter((block) => !(typeof block === "object" && block !== null && block.type === "text"));
+    messages[i] = { ...message, content: [...kept, { type: "text" as const, text: clamped }] };
+    const key = `${sid}:${text.length}:${text.slice(0, 48)}`;
+    if (!runtime.giantClampSeen(key)) {
+      runtime.markGiantClampSeen(key);
+      logWarn("context", { sid, event: "giant-tool-result-clamped", chars: text.length, kept: headChars + tailChars, limit });
+    }
+  }
 }
 
 function nudgeMessage(nudge: NudgeDecision, blocks: CompressionBlock[], prompts: Prompts): AgentMessage {

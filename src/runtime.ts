@@ -43,6 +43,10 @@ export interface AcpRuntime {
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
   clearNudgeTracking(): void;
+  emergencyThrottled(): boolean;
+  markEmergencyShown(): void;
+  giantClampSeen(key: string): boolean;
+  markGiantClampSeen(key: string): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   stateFor(ctx: ExtensionContext, liveMessages?: AgentMessage[]): Promise<{ state: CompressionState; coreMessages: ReturnType<typeof entriesToCoreMessages>; entries: SessionEntry[] }>;
@@ -189,6 +193,8 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let adapterRef = adapter;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
+  let lastEmergencyShownAt = 0;
+  const giantClampKeys = new Set<string>();
 
   async function acquireLock(sid: string): Promise<() => void> {
     const prev = locks.get(sid) ?? Promise.resolve();
@@ -241,5 +247,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, liveContextLimit, configFor, stateFor, save, acquireLock };
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); lastEmergencyShownAt = 0; }, emergencyThrottled: () => Date.now() - lastEmergencyShownAt < EMERGENCY_THROTTLE_MS, markEmergencyShown: () => { lastEmergencyShownAt = Date.now(); }, giantClampSeen: (k) => giantClampKeys.has(k), markGiantClampSeen: (k) => { giantClampKeys.add(k); }, liveContextLimit, configFor, stateFor, save, acquireLock };
 }
+
+const EMERGENCY_THROTTLE_MS = 60_000;
