@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Config, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
-import { type AdapterConfig, resolveDelegate } from "./config.js";
+import { type AdapterConfig, resolveDelegate, resolveLimit } from "./config.js";
 import { createRuntime, type AcpRuntime } from "./runtime.js";
 import { makeCompressTool } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
@@ -72,6 +72,22 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
       runtime.setAdapter(applyUserConfig(runtime.adapter, user));
       setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
       if (runtime.adapter.debug !== undefined) setDebugEnabled(runtime.adapter.debug);
+      const live = runtime.liveContextLimit(ctx);
+      const resolved = resolveLimit(runtime.adapter, live);
+      logInfo("config", {
+        event: "resolved",
+        sid,
+        limit: resolved.limit,
+        limitSource: resolved.source,
+        liveContextLimit: live,
+        userConfig: summarizeUserConfig(user),
+        effective: {
+          emergencyThresholdPct: runtime.adapter.compress?.emergencyThresholdPercent ?? null,
+          maxContextLimitPct: runtime.adapter.compress?.maxContextLimit ?? null,
+          preserveRecentMessages: runtime.adapter.preserveRecentMessages ?? null,
+          autoUpdate: runtime.adapter.autoUpdate ?? null,
+        },
+      });
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }
@@ -243,6 +259,17 @@ function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
     return { systemPrompt: formatSystemPromptForEvent(event.systemPrompt, prompt) };
   });
+}
+
+function summarizeUserConfig(value: unknown): Record<string, unknown> {
+  if (value === null || value === undefined || typeof value !== "object") return { config: value ?? null };
+  const out: Record<string, unknown> = {};
+  for (const [key, v] of Object.entries(value as Record<string, unknown>)) {
+    if (v === null || v === undefined || typeof v !== "object") out[key] = v ?? null;
+    else if (Array.isArray(v)) out[key] = `[array:${v.length}]`;
+    else out[key] = `{${Object.keys(v).join(",")}}`;
+  }
+  return out;
 }
 
 function collectOriginals(entries: Array<{ type: string; id: string; message?: AgentMessage; content?: unknown }>): Map<string, AgentMessage> {

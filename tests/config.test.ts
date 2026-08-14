@@ -1,8 +1,23 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveConfig, resolveDelegate, type AdapterConfig } from "../src/config.js";
+import { resolveConfig, resolveDelegate, resolveLimit, type AdapterConfig } from "../src/config.js";
 
 const EMPTY: AdapterConfig = {};
+
+test("resolveLimit reports which source produced the limit (issue #38 config observability)", () => {
+  const prev = process.env.ACP_MODEL_CONTEXT_LIMIT;
+  try {
+    delete process.env.ACP_MODEL_CONTEXT_LIMIT;
+    assert.deepEqual(resolveLimit(EMPTY, 1_000_000), { limit: 1_000_000, source: "live" });
+    assert.deepEqual(resolveLimit({ modelContextLimit: 500_000 }, 1_000_000), { limit: 500_000, source: "user" });
+    assert.deepEqual(resolveLimit(EMPTY, 0), { limit: 150_000, source: "fallback" });
+    process.env.ACP_MODEL_CONTEXT_LIMIT = "999999";
+    assert.deepEqual(resolveLimit({ modelContextLimit: 500_000 }, 1_000_000), { limit: 999_999, source: "env" });
+  } finally {
+    if (prev === undefined) delete process.env.ACP_MODEL_CONTEXT_LIMIT;
+    else process.env.ACP_MODEL_CONTEXT_LIMIT = prev;
+  }
+});
 
 test("resolveConfig uses the live model context window as-is (no cap on large windows)", () => {
   const cfg = resolveConfig(EMPTY, 1_000_000);

@@ -106,18 +106,17 @@ export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; dis
   };
 }
 
-export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
+export function resolveLimit(adapter: AdapterConfig, liveContextLimit: number): { limit: number; source: "env" | "user" | "live" | "fallback" } {
   const envLimit = process.env.ACP_MODEL_CONTEXT_LIMIT;
   const envLimitNum = envLimit ? Number(envLimit) : NaN;
-  const FALLBACK_LIMIT = 150_000;
-  const limit =
-    !Number.isNaN(envLimitNum) && envLimitNum > 0
-      ? envLimitNum
-      : adapter.modelContextLimit && adapter.modelContextLimit > 0
-        ? adapter.modelContextLimit
-        : liveContextLimit > 0
-          ? liveContextLimit
-          : FALLBACK_LIMIT;
+  if (!Number.isNaN(envLimitNum) && envLimitNum > 0) return { limit: envLimitNum, source: "env" };
+  if (adapter.modelContextLimit && adapter.modelContextLimit > 0) return { limit: adapter.modelContextLimit, source: "user" };
+  if (liveContextLimit > 0) return { limit: liveContextLimit, source: "live" };
+  return { limit: 150_000, source: "fallback" };
+}
+
+export function resolveConfig(adapter: AdapterConfig, liveContextLimit: number): Config {
+  const { limit } = resolveLimit(adapter, liveContextLimit);
   const config = defaultConfig(limit, {
     protectedTools: adapter.protectedTools ?? [],
     preserveRecentMessages: adapter.preserveRecentMessages ?? 5,
