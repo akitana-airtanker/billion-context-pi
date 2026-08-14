@@ -726,20 +726,65 @@ function toolResultMsg(id: string, text: string) {
   };
 }
 
-test("context handler clamps a giant tool result to 25% of the context limit (issue #38)", async () => {
+test("context handler leaves sub-threshold tool results untouched and honors giantToolResultPercent=0 (issue #38 no 误杀)", async () => {
   const { api, handlers } = captureApi();
   createAcpExtension({ modelContextLimit: 200_000 })(api as any);
-  const giant = "x".repeat(300_000);
-  const entries = [userMsg("e1", "first"), toolResultMsg("e2", giant), userMsg("e3", "last")];
+  const big = "x".repeat(300_000);
+  const entries = [userMsg("e1", "first"), toolResultMsg("e2", big), userMsg("e3", "last")];
   const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-giant-clamp.session.json");
 
   const result = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ ...(e as any).message })) }, ctx);
   const toolOut = result.messages.find((m: any) => m.role === "toolResult") as any;
   const text = ((toolOut.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
-  assert.ok(text.includes("ACP guard"), "giant tool result must carry the clamp note");
-  assert.ok(text.length < 200_000, `clamped text must stay under 25% of the limit, got ${text.length}`);
+  assert.ok(!text.includes("ACP guard"), "37.5%-of-limit result with a fitting request must NOT be clamped");
+
+  const disabled = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000, giantToolResultPercent: 0 })(disabled.api as any);
+  const giant = "x".repeat(500_000);
+  const disabledEntries = [userMsg("e1", "first"), toolResultMsg("e2", giant), userMsg("e3", "last")];
+  const disabledCtx = fakeCtx(disabledEntries, "/tmp/nonexistent-pai-acp-giant-disabled.session.json");
+  const disabledResult = await disabled.handlers.get("context")![0]!({ type: "context", messages: disabledEntries.map((e) => ({ ...(e as any).message })) }, disabledCtx);
+  const disabledOut = disabledResult.messages.find((m: any) => m.role === "toolResult") as any;
+  const disabledText = ((disabledOut.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
+  assert.ok(!disabledText.includes("ACP guard"), "giantToolResultPercent=0 disables the absolute tier");
+});
+
+test("context handler clamps a tool result above 50% of the window even when the request fits (issue #38 absolute tier)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const giant = "x".repeat(500_000);
+  const entries = [userMsg("e1", "first"), toolResultMsg("e2", giant), userMsg("e3", "last")];
+  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-giant-absolute.session.json");
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ ...(e as any).message })) }, ctx);
+  const toolOut = result.messages.find((m: any) => m.role === "toolResult") as any;
+  const text = ((toolOut.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
+  assert.ok(text.includes("ACP guard"), "62.5%-of-window single result must be clamped");
+  assert.ok(text.length < 500_000, `clamped text must shrink, got ${text.length}`);
   const originalText = ((entries[1]!.message as any).content as any[]).find((b: any) => b.type === "text")!.text;
-  assert.equal(originalText.length, 300_000, "session-log original must never be mutated");
+  assert.equal(originalText.length, 500_000, "session-log original must never be mutated");
+});
+
+test("context handler clamps even small tool results once the request is projected to overflow (issue #38 overflow tier)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const filler = "y".repeat(700_000);
+  const medium = "x".repeat(120_000);
+  const entries = [
+    userMsg("e1", "go"),
+    { type: "message", id: "e2", parentId: null, timestamp: "", message: { role: "assistant", content: [{ type: "text", text: filler }], timestamp: Date.now() } },
+    toolResultMsg("e3", medium),
+    userMsg("e4", "last"),
+  ];
+  const ctx = fakeCtx(entries, "/tmp/nonexistent-pai-acp-giant-overflow.session.json");
+
+  const result = await handlers.get("context")![0]!({ type: "context", messages: entries.map((e) => ({ ...(e as any).message })) }, ctx);
+  const toolOut = result.messages.find((m: any) => m.role === "toolResult") as any;
+  const text = ((toolOut.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
+  assert.ok(text.includes("ACP guard"), "15%-of-window result must be clamped when the request overflows");
+  const assistant = result.messages.find((m: any) => m.role === "assistant") as any;
+  const assistantText = ((assistant.content as any[]).filter((b: any) => b.type === "text") as any[]).map((b: any) => b.text).join("\n");
+  assert.ok(!assistantText.includes("ACP guard"), "non-toolResult messages are never clamped");
 });
 
 test("emergency nudge injects at most once per minute (issue #38 retry-storm throttle)", async () => {

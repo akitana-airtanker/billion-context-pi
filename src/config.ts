@@ -39,6 +39,14 @@ export interface AdapterConfig {
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;
+  /** Per-toolResult size ceiling as a percent of the effective context window
+   *  (0-100, default 50). A single tool result larger than this share is
+   *  clamped for the LLM request even when the request would otherwise fit
+   *  (originals stay in the session log). Independent of this, whenever the
+   *  whole request itself is projected to overflow the window, the per-message
+   *  ceiling drops to 10% so the request can actually shrink. 0 disables the
+   *  unconditional tier (overflow-driven clamping stays active). */
+  giantToolResultPercent?: number;
   protectedTools?: string[];
   preserveRecentMessages?: number;
   /** Check npm for a newer billion-context-pi on startup and auto-install it. Default: true.

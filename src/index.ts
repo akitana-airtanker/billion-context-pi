@@ -189,7 +189,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const originalById = collectOriginals(entries);
       const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
-      clampGiantToolResults(rebuilt, config, runtime, sid);
+      clampGiantToolResults(rebuilt, config, runtime, sid, tokenCount, runtime.liveContextLimit(ctx), runtime.adapter.giantToolResultPercent ?? 50);
       const debugOn = debug.enabled;
 
     if (turn.nudge?.shouldInject) {
@@ -290,21 +290,33 @@ function collectOriginals(entries: Array<{ type: string; id: string; message?: A
   return map;
 }
 
-// Issue #38 death-loop defense: a single oversized tool result (observed
-// ~870K tokens) can push an otherwise healthy request far past the real
-// provider window before the kernel's usage-gated emergency truncation ever
-// engages. Unconditionally clamp any toolResult whose text exceeds 25% of
-// the context limit. The session log keeps the full text; only this LLM
-// request sees the clamped copy.
+// Issue #38 death-loop defense. Two tiers, both clamp only the LLM request
+// copy (session log keeps originals):
+//  1. OVERFLOW tier: when the whole request is projected to exceed the real
+//     window (pi realUsage tokens preferred — the one number that was CORRECT
+//     in the #38 incident), any toolResult above 10% of the window is clamped.
+//     This is the anti-death-loop tier and cannot 误杀 a fitting request.
+//  2. ABSOLUTE tier: regardless of request state, a single toolResult above
+//     `giantToolResultPercent` (default 50%) of the window is clamped. Even a
+//     legitimate oversized read cannot occupy half the managed budget without
+//     forcing a compression cascade right after.
 function clampGiantToolResults(
   messages: AgentMessage[],
   config: Config,
   runtime: AcpRuntime,
   sid: string,
+  requestTokens: number,
+  liveLimit: number,
+  giantPercent: number,
 ): void {
   const limit = config.modelContextLimit;
   if (!(limit > 0)) return;
-  const maxChars = Math.floor(limit * 0.25) * 4;
+  const window = Math.max(limit, liveLimit > 0 ? liveLimit : 0);
+  const overflow = requestTokens >= window * 0.95;
+  const pct = overflow ? 0.1 : giantPercent / 100;
+  if (!(pct > 0)) return;
+  const maxChars = Math.floor(window * pct) * 4;
+  if (!(maxChars > 0)) return;
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]!;
     if (message.role !== "toolResult") continue;
@@ -312,7 +324,7 @@ function clampGiantToolResults(
     if (text.length <= maxChars) continue;
     const headChars = Math.floor(maxChars * 0.6);
     const tailChars = Math.floor(maxChars * 0.2);
-    const note = `\n\n[ACP guard: tool output clamped from ${text.length} to ${headChars + tailChars} chars — a single result exceeded 25% of the context limit; the full text is preserved in the session log]\n\n`;
+    const note = `\n\n[ACP guard: tool output clamped from ${text.length} to ${headChars + tailChars} chars — single result exceeded ${Math.round(pct * 100)}% of the ${overflow ? "window (request overflow projected)" : "context window"}; the full text is preserved in the session log]\n\n`;
     const clamped = `${text.slice(0, headChars)}${note}${text.slice(text.length - tailChars)}`;
     if (!Array.isArray(message.content)) continue;
     const kept = message.content.filter((block) => !(typeof block === "object" && block !== null && block.type === "text"));
@@ -320,7 +332,7 @@ function clampGiantToolResults(
     const key = `${sid}:${text.length}:${text.slice(0, 48)}`;
     if (!runtime.giantClampSeen(key)) {
       runtime.markGiantClampSeen(key);
-      logWarn("context", { sid, event: "giant-tool-result-clamped", chars: text.length, kept: headChars + tailChars, limit });
+      logWarn("context", { sid, event: "giant-tool-result-clamped", tier: overflow ? "overflow" : "absolute", chars: text.length, kept: headChars + tailChars, window, requestTokens });
     }
   }
 }
