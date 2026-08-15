@@ -30,7 +30,22 @@ export function proxyBaseFromUrl(baseUrl: string | undefined): string | undefine
 
 export function proxyBaseForContext(ctx: ExtensionContext): string | undefined {
     if (process.env.ACP_COOPERATIVE_PROXY === "0") return undefined;
-    return proxyBaseFromUrl(ctx.model?.baseUrl);
+    return proxyBaseFromUrl(ctx.model?.baseUrl) ?? proxyBaseFromEnv();
+}
+
+/** MITM transparent-proxy mode has no `/bili/` prefix to detect (the baseUrl
+ *  is the real provider URL). The proxy's own launcher (`bili pi`) exports
+ *  BILLION_CONTEXT_PROXY alongside HTTPS_PROXY + the CA vars; trusting it
+ *  requires no probe — a stale value surfaces as a tool-forward error. */
+export function proxyBaseFromEnv(): string | undefined {
+    const raw = process.env.BILLION_CONTEXT_PROXY?.trim();
+    if (!raw) return undefined;
+    try {
+        const url = new URL(raw);
+        return url.protocol === "http:" || url.protocol === "https:" ? `${url.protocol}//${url.host}` : undefined;
+    } catch {
+        return undefined;
+    }
 }
 
 export async function forwardToolToProxy(proxyBase: string, conversationId: string, tool: string, args: unknown): Promise<string> {

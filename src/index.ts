@@ -61,13 +61,19 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 
 // Cooperative proxy mode: announce this session to the billion-context proxy
 // so it keys state by pi's real session id and switches the session to
-// plugin mode (no wire tool injection — tools are native here). No-op unless
-// the model's baseUrl routes through the proxy (`/bili/` prefix).
+// plugin mode (no wire tool injection — tools are native here). Also reports
+// the model's context window from inside pi (pinned/overridden values the
+// proxy's registry can't know, e.g. private relays in MITM mode). No-op
+// unless proxied (`/bili/` baseUrl or BILLION_CONTEXT_PROXY from `bili pi`).
 function wireProviderHeaders(pi: ExtensionAPI): void {
   pi.on("before_provider_headers", (event, ctx) => {
     if (proxyBaseForContext(ctx) === undefined) return;
     event.headers["x-bili-plugin"] = PLUGIN_AGENT_NAME;
     event.headers["x-bili-plugin-conversation"] = ctx.sessionManager.getSessionId();
+    const window = ctx.model?.contextWindow;
+    if (typeof window === "number" && Number.isFinite(window) && window > 0) {
+      event.headers["x-bili-plugin-context-window"] = String(Math.floor(window));
+    }
   });
 }
 

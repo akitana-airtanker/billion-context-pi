@@ -32,6 +32,9 @@
 
 ## 4. Notes / Follow-ups
 
-- MITM-mode (transparent proxy, no `/bili/` prefix) is NOT detected — cooperative mode requires the zero-config prefix baseURL (documented). MITM + extension would still double-compress; users on MITM should disable the extension or set the prefix.
+- ~~MITM-mode (transparent proxy, no `/bili/` prefix) is NOT detected~~ — **landed in this PR (follow-up commit)**: the billion-context launcher now exports `BILLION_CONTEXT_PROXY` next to `HTTPS_PROXY` for `bili pi`/`codex`/`claude`; `proxyBaseForContext` falls back to it (trusted without probing — a stale value surfaces as a tool-forward error). MITM cooperative mode works end-to-end.
+- `x-bili-plugin-context-window` (new): `before_provider_headers` reports `ctx.model.contextWindow` from inside pi; the proxy treats it as the authoritative native window (outranks its table/registry; operator `compress.modelContextLimit` still wins).
+- `GET /__bili/plugin/status?conversationId=` (new proxy endpoint): context-level visibility (contextTokens = input+cache-read, contextLimit, blocks, requests) for plugin status UIs.
+- Fixed a usage-application race in the proxy's plugin stream passthrough: usage is applied BEFORE `res.end()` so the client's next request (status fetch / follow-up turn reading `lastInputTokens` for nudges) always sees it.
 - `before_provider_headers` exists in the pi SDK as of this version; if an older pi host lacks it, registration is ignored harmlessly (extension `on` overloads).
 - Cross-repo dependency: the proxy half must merge first (ranxianglei/billion-context#161) — the endpoints this forwards to only exist there. No code-level version coupling (protocol is HTTP + manifest).

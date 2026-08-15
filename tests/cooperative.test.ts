@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { createAcpExtension } from "../src/index.js";
-import { proxyBaseFromUrl, forwardToolToProxy } from "../src/cooperative.js";
+import { proxyBaseFromUrl, proxyBaseFromEnv, forwardToolToProxy } from "../src/cooperative.js";
 
 function captureApi() {
   const handlers = new Map<string, ((event: any, ctx: any) => any)[]>();
@@ -62,11 +62,42 @@ test("before_provider_headers announces plugin mode with pi's session id", async
   await handlers.get("before_provider_headers")![0]!({ type: "before_provider_headers", headers }, fakeCtx([], PROXY_URL));
   assert.equal(headers["x-bili-plugin"], "pi");
   assert.equal(headers["x-bili-plugin-conversation"], "test-session");
+  assert.equal(headers["x-bili-plugin-context-window"], "200000");
 
   const plain: Record<string, string | null> = {};
   await handlers.get("before_provider_headers")![0]!({ type: "before_provider_headers", headers: plain }, fakeCtx([], "https://api.anthropic.com"));
   assert.equal(plain["x-bili-plugin"], undefined);
   assert.equal(plain["x-bili-plugin-conversation"], undefined);
+  assert.equal(plain["x-bili-plugin-context-window"], undefined);
+});
+
+test("BILLION_CONTEXT_PROXY enables cooperative mode without a /bili/ baseUrl (MITM launcher)", async () => {
+  const prev = process.env.BILLION_CONTEXT_PROXY;
+  process.env.BILLION_CONTEXT_PROXY = "http://127.0.0.1:8787";
+  try {
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+
+    const headers: Record<string, string | null> = {};
+    await handlers.get("before_provider_headers")![0]!({ type: "before_provider_headers", headers }, fakeCtx([], "https://api.anthropic.com"));
+    assert.equal(headers["x-bili-plugin"], "pi");
+    assert.equal(headers["x-bili-plugin-conversation"], "test-session");
+    assert.equal(headers["x-bili-plugin-context-window"], "200000");
+
+    assert.equal(proxyBaseFromEnv(), "http://127.0.0.1:8787");
+    process.env.BILLION_CONTEXT_PROXY = "http://127.0.0.1:9999/some/path";
+    assert.equal(proxyBaseFromEnv(), "http://127.0.0.1:9999", "path is stripped to the origin");
+    process.env.BILLION_CONTEXT_PROXY = "not a url";
+    assert.equal(proxyBaseFromEnv(), undefined);
+    delete process.env.BILLION_CONTEXT_PROXY;
+
+    const plain: Record<string, string | null> = {};
+    await handlers.get("before_provider_headers")![0]!({ type: "before_provider_headers", headers: plain }, fakeCtx([], "https://api.anthropic.com"));
+    assert.equal(plain["x-bili-plugin"], undefined, "without env or /bili/ prefix cooperative mode is off");
+  } finally {
+    if (prev === undefined) delete process.env.BILLION_CONTEXT_PROXY;
+    else process.env.BILLION_CONTEXT_PROXY = prev;
+  }
 });
 
 test("context handler passes messages through untouched in cooperative mode", async () => {

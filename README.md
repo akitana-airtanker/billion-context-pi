@@ -68,7 +68,10 @@ When pi's model `baseUrl` routes through a [billion-context](https://github.com/
 
 - the 4 tools (`compress` / `decompress` / `search_context` / `acp_status`) stay natively registered in pi — native tool UX, permissions and audit — and their execution is forwarded to the proxy (`POST /__bili/plugin/tool`), which runs them under its session lock;
 - every model request carries `x-bili-plugin: pi` + `x-bili-plugin-conversation: <pi session id>`, so the proxy keys state by pi's **real** session identity (no more content-fingerprint collisions) and suppresses its own wire-level tool injection (no double compression);
+- the model's context window is reported from inside pi (`x-bili-plugin-context-window`) — pinned/overridden values the proxy's registry can't know become the authoritative nudge denominator;
 - the extension's in-process pipeline (processTurn, nudges, philosophy prompt) is skipped for that session — the proxy does all of it.
+
+Detection works in both proxy modes: the `/bili/` prefix in the model baseUrl, **and MITM transparent mode** — `bili pi` (the billion-context launcher) exports `BILLION_CONTEXT_PROXY` next to `HTTPS_PROXY`, and the extension trusts it directly, so `bili pi` now gives you the native-tool cooperative experience too.
 
 Without a proxy (or with `ACP_COOPERATIVE_PROXY=0`) behavior is byte-identical to the standalone extension.
 
