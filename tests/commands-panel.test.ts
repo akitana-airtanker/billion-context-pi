@@ -1,9 +1,9 @@
-import { test } from "bun:test";
+import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AcpRuntime } from "../src/runtime.js";
 import type { ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 
-// tsup defines CURRENT_VERSION at build time; under `bun test` it is bare.
+// tsup defines CURRENT_VERSION at build time; under the node runner it is bare.
 (globalThis as Record<string, unknown>).CURRENT_VERSION ??= "0.0.0-test";
 const { makeCommands } = await import("../src/commands.js");
 
