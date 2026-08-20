@@ -7,7 +7,7 @@ import type {
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
-import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS, MAX_EMERGENCY_NUDGES_PER_TURN } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
@@ -76,6 +76,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("session_start", async (_event, ctx) => {
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
+    runtime.clearEmergencyNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking();
     // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
@@ -287,32 +288,39 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       //  2. TERMINAL echo (debug only): when debug is on, also print the exact
       //     text via ctx.ui.notify so the user can observe what is being
       //     injected while debugging. The model never sees terminal output.
-      // Emergency nudges (usage >= 80%) bypass the per-turn dedup so the
-      // overflow warning always reaches the model. Other nudges inject at most
-      // once per turn: pi fires the context event multiple times per assistant
-      // reply (streaming/tool loop), and without this gate the same nudge
-      // would be appended on every event.
+      // Nudge frequency: pi fires the context event multiple times per
+      // assistant reply (streaming/tool loop). Non-emergency nudges inject at
+      // most once per user turn (per-turn dedup). Emergency nudges (usage >=
+      // the emergency threshold) bypass that dedup so the overflow warning
+      // always reaches the model — but they are still capped at
+      // MAX_EMERGENCY_NUDGES_PER_TURN per user turn: without the cap, a long
+      // tool loop that stays over the threshold would re-nudge (and
+      // re-compress) on EVERY LLM call. Beyond the cap, the kernel's automatic
+      // tool-output truncate (>= 95% usage) and the overflow self-heal are the
+      // backstops.
       const emergency = turn.nudge.breakdown?.emergencyOverride === 1;
       // Recommend only ranges the model can actually compress: a tiny
       // fragmented range in the list makes batched attempts fail atomically
       // (kernel validates the whole batch). See viableRanges in billion-context-kit.
       turn.nudge.compressibleRanges = viableRanges(turn.nudge.compressibleRanges);
       const alreadyShown = !emergency && runtime.nudgeShownFor(turnKey);
-      if (!alreadyShown) {
+      const emergencyCapped = emergency && runtime.emergencyNudgeCountFor(turnKey) >= MAX_EMERGENCY_NUDGES_PER_TURN;
+      if (!alreadyShown && !emergencyCapped) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
         const top = [...turn.nudge.compressibleRanges].sort((a, b) => b.tokens - a.tokens)[0];
         const example = top ? `\n\nExample: compress({ content: [{ startId: "${top.startRef}", endId: "${top.endRef}", summary: "..." }] })` : "";
         if (emergency) {
-          logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length });
+          logWarn("nudge", { sid: ctx.sessionManager.getSessionId(), event: "emergency-inject", pct: Math.round(turn.nudge.contextUsage * 100), voice: rendered.voice, compressible: turn.nudge.compressibleRanges.length, count: runtime.emergencyNudgeCountFor(turnKey) + 1, max: MAX_EMERGENCY_NUDGES_PER_TURN });
         }
         if (debugOn && ctx.hasUI) {
           ctx.ui.notify(`[ACP nudge → context]${emergency ? " [EMERGENCY]" : ""}\n${rendered.text}${example}`);
         }
         if (!emergency) runtime.markNudgeShown(turnKey);
+        else runtime.markEmergencyNudge(turnKey);
         debug.event("nudge-injected", { sid: ctx.sessionManager.getSessionId(), voice: rendered.voice, channels: ["context", debugOn ? "terminal" : null].filter(Boolean), emergency, turnKey, text: rendered.text + example });
       } else {
-        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: turn.nudge.reason });
+        debug.event("nudge-suppressed", { sid: ctx.sessionManager.getSessionId(), turnKey, reason: emergencyCapped ? `emergency nudge cap reached (${MAX_EMERGENCY_NUDGES_PER_TURN}/turn)` : turn.nudge.reason });
       }
     }
 

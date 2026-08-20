@@ -68,6 +68,14 @@ export interface AcpRuntime {
   setPrompts(prompts: Prompts): void;
   markNudgeShown(turnKey: string): void;
   nudgeShownFor(turnKey: string): boolean;
+  /** Emergency nudge injections already made for this user turn (turnKey).
+   *  Emergency nudges bypass the per-turn dedup, so this counter is what caps
+   *  them at MAX_EMERGENCY_NUDGES_PER_TURN. */
+  emergencyNudgeCountFor(turnKey: string): number;
+  /** Record an emergency nudge injection for this user turn. */
+  markEmergencyNudge(turnKey: string): void;
+  /** Drop the per-turn emergency nudge counters (session_start). */
+  clearEmergencyNudgeTracking(): void;
   /** Process compress toolResults for the CURRENT user turn only (the caller
    *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
    *  per toolCallId. Outcome classes: isError → failure (count++), success
@@ -233,6 +241,13 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
 }
 /** Max FAILED compress calls that get a retry prompt per user turn. */
 export const MAX_COMPRESS_ATTEMPTS = 3;
+/** Max EMERGENCY nudge injections per user turn. Emergency nudges bypass the
+ *  per-turn dedup so the overflow warning always reaches the model — but in a
+ *  long tool loop that stays over the emergency threshold that would re-nudge
+ *  (and re-compress) on EVERY LLM call. Beyond the cap, the kernel's automatic
+ *  tool-output truncate (>= 95% usage) and the overflow self-heal are the
+ *  backstops. */
+export const MAX_EMERGENCY_NUDGES_PER_TURN = 3;
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const density = new DensityEstimator();
@@ -249,6 +264,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
   const nudgeShownTurns = new Set<string>();
+  const emergencyNudgeCounts = new Map<string, number>();
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -402,4 +418,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, emergencyNudgeCountFor: (k) => emergencyNudgeCounts.get(k) ?? 0, markEmergencyNudge: (k) => { emergencyNudgeCounts.set(k, (emergencyNudgeCounts.get(k) ?? 0) + 1); }, clearEmergencyNudgeTracking: () => { emergencyNudgeCounts.clear(); }, noteCompressOutcomes, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
