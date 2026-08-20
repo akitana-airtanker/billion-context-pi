@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
+import { isCompressSuccessText } from "../src/compress-tool.js";
 
 // Failure-triggered compress retry (session 01a00a38 post-mortem): the model's
 // ONLY compress call in a 3-hour session was rejected by pi's typebox
@@ -311,5 +312,53 @@ test("neutral outcomes freeze the counter; success resets; new turn gets a fresh
   entries = [...entries, userMsg("e7", "next question")];
   const r6 = await fire(handlers, ctx);
   assert.equal(retryMsgs(r6).length, 0, "pre-turn failure out of scope after user message");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+// ─── issue #4: 0-block panels must not reset the retry counter ─────────────
+
+const ZERO_BLOCK_ERRORS = "▣ ACP | 50.0K → 50.0K tokens (~0 reclaimed, 0 blocks)\nErrors: Total compressible content too small (2000 chars across 1 range(s), min 5000). Combine more messages into your range(s) to meet the threshold.";
+const ZERO_BLOCK_CONSUMED = "▣ ACP | 50.0K → 50.0K tokens (~0 reclaimed, 0 blocks)\n⚠️ Skipped range (m00001..m00005) — already compressed (messages consumed by existing block(s)); nothing to compress.";
+
+test("isCompressSuccessText: success panels true; 0-block panels and non-panels neutral", () => {
+  assert.equal(isCompressSuccessText(SUCCESS_PANEL), true);
+  assert.equal(isCompressSuccessText("▣ ACP | 50.0K → 49.0K tokens (~1.0K reclaimed, 1 block)"), true);
+  assert.equal(isCompressSuccessText("▣ ACP | 50.0K → 49.0K tokens (~1.0K reclaimed, 2 blocks)\nErrors: range m00006..m00007: unknown ref"), true, "partial batch (blocks created) is still a success");
+  assert.equal(isCompressSuccessText(ZERO_BLOCK_ERRORS), false, "0-block semantic error panel is neutral, not success");
+  assert.equal(isCompressSuccessText(ZERO_BLOCK_CONSUMED), false, "0-block already-compressed panel is neutral");
+  assert.equal(isCompressSuccessText(NEUTRAL_TEXT), false);
+  assert.equal(isCompressSuccessText(""), false);
+});
+
+test("alternating failure modes cannot bypass the retry cap via 0-block panels (issue #4)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-it4.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx);
+
+  // thrown failure (attempt 1) → 0-block error panel (neutral) → failure must
+  // be attempt 2, not a reset-to-1
+  entries = [...entries, toolResultMsg("e2", "call_1", VALIDATION_ERR, true)];
+  const r1 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r1).length, 1);
+  assert.match(retryText(r1), /attempt 1 of 3/);
+
+  entries = [...entries, toolResultMsg("e3", "call_2", ZERO_BLOCK_ERRORS, false)];
+  const r2 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r2).length, 0, "0-block panel as newest outcome → no prompt");
+
+  entries = [...entries, toolResultMsg("e4", "call_3", VALIDATION_ERR, true)];
+  const r3 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r3).length, 1);
+  assert.match(retryText(r3), /attempt 2 of 3/, "0-block panel must not reset the counter");
+
+  // third thrown failure → capped despite the interleaved 0-block panels
+  entries = [...entries, toolResultMsg("e5", "call_4", VALIDATION_ERR, true)];
+  const r4 = await fire(handlers, ctx);
+  assert.equal(retryMsgs(r4).length, 0, "cap reached → no retry nudge");
   await rm(`${stateFile}.acp.json`, { force: true });
 });

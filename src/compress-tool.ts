@@ -94,12 +94,19 @@ function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | strin
 }
 
 /** True when a (non-error) compress toolResult text represents a completed
- *  compression run — the "▣ ACP | …" panel. Other non-error strings ("No
- *  ranges provided.", semantic "Errors: …" panels with nothing reclaimed)
- *  are neutral outcomes that neither reset nor advance the retry counter
- *  (see noteCompressOutcomes in runtime.ts). */
+ *  compression run — a "▣ ACP | …" panel with at least one block created.
+ *  Other non-error strings ("No ranges provided.") and 0-block panels
+ *  (semantic "Errors: …" / "already compressed" outcomes that reclaimed
+ *  nothing) are neutral: they neither reset nor advance the retry counter
+ *  (see noteCompressOutcomes in runtime.ts). Counting a 0-block panel as
+ *  success would let alternating failure modes (thrown arg error → 0-block
+ *  panel → thrown arg error …) reset the counter forever and bypass
+ *  MAX_COMPRESS_ATTEMPTS — an unbounded "compress again NOW" prompt loop. */
 export function isCompressSuccessText(text: string): boolean {
-  return text.trimStart().startsWith("▣ ACP |");
+  const t = text.trimStart();
+  if (!t.startsWith("▣ ACP |")) return false;
+  const header = t.split("\n", 1)[0] ?? "";
+  return !/,\s*0 blocks?\)/.test(header);
 }
 
 async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
