@@ -8,7 +8,7 @@ import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-
 import { renderNudgeText, resolvePrompts, defaultPrompts } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
 import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
-import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
+import { makeCompressTool, isCompressSuccessText, isCompressNoopText, normalizeRanges } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
@@ -345,11 +345,26 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         rebuilt.push(compressRetryMessage(failed.text, outcome.count, MAX_COMPRESS_ATTEMPTS));
         logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, toolCallId: failed.toolCallId });
         debug.event("compress-retry-injected", { sid, turnKey, attempt: outcome.count, toolCallId: failed.toolCallId, text: failed.text.slice(0, 200) });
-      } else if (outcome.cappedNow) {
-        logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
-        debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
-        if (ctx.hasUI) {
-          ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+      } else {
+        if (outcome.cappedNow) {
+          logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
+          debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
+          if (ctx.hasUI) {
+            ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+          }
+        }
+        // Post-cap STOP message (issue #9): the kernel HIDES failed compress
+        // calls from the sent view, so once the cap burns and the retry nudge
+        // goes silent the visible context stops changing — a deterministic
+        // model then re-issues the identical no-op call forever (3,849
+        // iterations, 5h13m). Keep injecting a hard stop while the newest
+        // outcome is still a failure; the count changes with every new
+        // failure, so the view never sits at a fixed point.
+        const latestOutcome = compressOutcomes[compressOutcomes.length - 1];
+        if (outcome.count >= MAX_COMPRESS_ATTEMPTS && latestOutcome && (latestOutcome.isError || latestOutcome.noop)) {
+          rebuilt.push(compressStopMessage(outcome.count));
+          logWarn("nudge", { sid, event: "compress-stop-inject", failures: outcome.count });
+          debug.event("compress-stop-injected", { sid, turnKey, failures: outcome.count });
         }
       }
     }
@@ -530,15 +545,30 @@ function turnStartIndex(entries: Array<{ type: string; message?: { role?: string
 // session would keep an old failure as the "newest outcome" forever, and the
 // per-turn counter reset would then re-prompt it with count 0 on every LLM
 // call of every later turn (review finding on 7ddd2c6).
-function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> {
-  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; text: string }> = [];
+function collectCompressOutcomes(entries: Array<{ type: string; id: string; message?: AgentMessage }>, startIndex: number): Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; ranges?: Array<{ startId: string; endId: string }>; text: string }> {
+  // Failed outcomes carry the exact range set of their compress call (parsed
+  // from the assistant toolCall block) so the tool-side circuit breaker
+  // (compressSpecBlocked) can refuse a byte-identical re-submission (issue #9).
+  const callContentById = new Map<string, unknown>();
+  for (const entry of entries) {
+    if (entry.type !== "message" || !entry.message) continue;
+    const m = entry.message as { role?: string; content?: unknown };
+    if (m.role !== "assistant" || !Array.isArray(m.content)) continue;
+    for (const block of m.content) {
+      const b = block as { type?: string; name?: string; id?: string; arguments?: { content?: unknown } };
+      if (b.type === "toolCall" && b.name === "compress" && b.id) callContentById.set(b.id, b.arguments?.content);
+    }
+  }
+  const out: Array<{ toolCallId: string; isError: boolean; success: boolean; noop: boolean; ranges?: Array<{ startId: string; endId: string }>; text: string }> = [];
   for (let i = Math.max(startIndex, -1) + 1; i < entries.length; i++) {
     const entry = entries[i]!;
     if (entry.type !== "message" || !entry.message) continue;
     const m = entry.message as { role?: string; toolName?: string; toolCallId?: string; isError?: boolean; content?: unknown };
     if (m.role !== "toolResult" || m.toolName !== "compress" || !m.toolCallId) continue;
     const text = extractText(m.content);
-    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), text });
+    const parsed = normalizeRanges(callContentById.get(m.toolCallId));
+    const ranges = Array.isArray(parsed) && parsed.length > 0 ? parsed.map((r) => ({ startId: r.startId, endId: r.endId })) : undefined;
+    out.push({ toolCallId: m.toolCallId, isError: m.isError === true, success: m.isError !== true && isCompressSuccessText(text), noop: m.isError !== true && isCompressNoopText(text), ranges, text });
   }
   return out;
 }
@@ -560,6 +590,15 @@ function compressRetryMessage(errorText: string, attempt: number, maxAttempts: n
     attempt >= maxAttempts - 1 ? "- This is your LAST retry for this turn — if it fails again, compression pauses until the next user message." : null,
     "- If ranges were skipped (already compressed / too small), do NOT retry the same refs — run acp_status and use its CURRENT compressible ranges.",
   ].filter((l): l is string => l !== null).join("\n");
+  return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
+}
+
+function compressStopMessage(failCount: number): AgentMessage {
+  const text = [
+    `[ACP] Compress circuit breaker OPEN — ${failCount} failed/no-op compress calls this turn (cap ${MAX_COMPRESS_ATTEMPTS}).`,
+    "Repeat attempts with the same ranges are refused without executing.",
+    "STOP calling compress for the rest of this turn. Proceed with your actual task now — compression re-enables on the next user message.",
+  ].join("\n");
   return { role: "user", content: [{ type: "text", text }], timestamp: Date.now() } as AgentMessage;
 }
 

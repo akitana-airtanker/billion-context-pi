@@ -74,12 +74,21 @@ export interface AcpRuntime {
    *  failure (count++), success panel (>= 1 block) → reset, other non-error
    *  text → neutral (count unchanged). Returns the failure count, the
    *  toolCallId of the newest failure that still needs a retry prompt (null
-   *  when none, capped, or count 0), and whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+   *  when none, capped, or count 0), and whether the cap was just reached.
+   *  Failed outcomes may carry the parsed ranges of their compress call —
+   *  recorded so the tool-side breaker (compressSpecBlocked) can refuse an
+   *  exact re-submission of an already-failed range set (issue #9). */
+  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; ranges?: ReadonlyArray<{ startId: string; endId: string }> }>): { count: number; retryFor: string | null; cappedNow: boolean };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
   compressRetryCappedFor(turnKey: string): boolean;
+  /** True when the EXACT range set already failed this turn AND the turn's
+   *  retry cap is burned — the compress tool refuses such calls without
+   *  executing anything (issue #9 fixed-point loop). */
+  compressSpecBlocked(turnKey: string, ranges: ReadonlyArray<{ startId: string; endId: string }>): boolean;
+  /** Failed/no-op compress count for the turn (0 when unknown). */
+  compressFailCountFor(turnKey: string): number;
   clearNudgeTracking(): void;
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -289,9 +298,15 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const compressOutcomeSeen = new Set<string>();
   let compressFailTurnKey: string | null = null;
   let compressFailCount = 0;
+  const compressFailSpecs = new Map<string, Set<string>>();
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
+  function rangeSpecKey(ranges: ReadonlyArray<{ startId: string; endId: string }>): string {
+    return JSON.stringify(ranges.map((r) => [r.startId, r.endId]));
+  }
+
+  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean; ranges?: ReadonlyArray<{ startId: string; endId: string }> }>): { count: number; retryFor: string | null; cappedNow: boolean } {
     if (compressFailTurnKey !== turnKey) {
+      if (compressFailTurnKey !== null) compressFailSpecs.delete(compressFailTurnKey);
       compressFailTurnKey = turnKey;
       compressFailCount = 0;
     }
@@ -301,8 +316,17 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       compressOutcomeSeen.add(o.toolCallId);
       if (o.isError || o.noop === true) {
         compressFailCount += 1;
+        if (o.ranges && o.ranges.length > 0) {
+          let specs = compressFailSpecs.get(turnKey);
+          if (!specs) {
+            specs = new Set<string>();
+            compressFailSpecs.set(turnKey, specs);
+          }
+          specs.add(rangeSpecKey(o.ranges));
+        }
       } else if (o.success) {
         compressFailCount = 0;
+        compressFailSpecs.delete(turnKey);
       }
       // neutral: counter untouched
     }
@@ -319,10 +343,22 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
+  function compressSpecBlocked(turnKey: string, ranges: ReadonlyArray<{ startId: string; endId: string }>): boolean {
+    if (!compressRetryCappedFor(turnKey)) return false;
+    const specs = compressFailSpecs.get(turnKey);
+    if (!specs || ranges.length === 0) return false;
+    return specs.has(rangeSpecKey(ranges));
+  }
+
+  function compressFailCountFor(turnKey: string): number {
+    return compressFailTurnKey === turnKey ? compressFailCount : 0;
+  }
+
   function clearCompressRetryTracking(): void {
     compressOutcomeSeen.clear();
     compressFailTurnKey = null;
     compressFailCount = 0;
+    compressFailSpecs.clear();
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -410,4 +446,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, compressSpecBlocked, compressFailCountFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

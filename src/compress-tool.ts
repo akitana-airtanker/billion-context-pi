@@ -4,9 +4,9 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AcpRuntime } from "./runtime.js";
+import { readContextEntries, type AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens, lastUserMessageId } from "./tokens.js";
 import { defaultCountTokens, type CompressionBlock } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
@@ -72,7 +72,7 @@ type RangeEntry = Static<typeof RangeSpec>;
 // handleCompress THROWS it so pi marks the toolResult isError:true and the
 // retry nudge (src/index.ts) can quote it back (returning it normally would
 // produce isError:false, which both skips the nudge and resets the counter).
-function normalizeRanges(content: CompressArgs["content"]): RangeEntry[] | string {
+export function normalizeRanges(content: unknown): RangeEntry[] | string {
   let ranges: unknown = content ?? [];
   if (typeof ranges === "string") {
     try {
@@ -142,6 +142,21 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   if (typeof maybeRanges === "string") throw new Error(maybeRanges);
   const ranges = maybeRanges;
   if (ranges.length === 0) return "No ranges provided.";
+  // Circuit breaker (issue #9): refuse an exact re-submission of an
+  // already-failed range set once this turn burned its failed-attempt cap —
+  // without this guard a deterministic model re-issued the byte-identical
+  // no-op call 3,849 times because the kernel hides failed calls from the
+  // sent view, pinning it at a fixed point.
+  const breakerEntries = readContextEntries(ctx.sessionManager);
+  const breakerTurnKey = lastUserMessageId(breakerEntries) ?? ctx.sessionManager.getSessionId();
+  if (runtime.compressSpecBlocked(breakerTurnKey, ranges)) {
+    const spans = ranges.map((r) => `${r.startId}..${r.endId}`).join(", ");
+    const fails = runtime.compressFailCountFor(breakerTurnKey);
+    logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "compress-breaker-refused", turnKey: breakerTurnKey, spans, fails });
+    throw new Error(
+      `Compress circuit breaker OPEN: ${fails} failed/no-op compress calls this turn and these exact ranges (${spans}) already failed. Nothing was executed. Do NOT call compress again with these ranges — the messages are already covered by an existing block. STOP calling compress for the rest of this turn and proceed with your actual task now; compression re-enables on the next user message. Use acp_status only after resuming real work if you need current compressible ranges.`,
+    );
+  }
   const { state: initialState, coreMessages } = await runtime.stateFor(ctx);
   const config = runtime.configFor(ctx);
   // Sent-view arbitration — the same scale as the context transform and
