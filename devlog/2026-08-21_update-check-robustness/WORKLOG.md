@@ -30,7 +30,12 @@
 - `tests/update.test.ts` — 重写，17 个测试：opt-out 短路（npm+fetch 双守卫）、`isNewer` 数值比较、`runNpm` 真实 npm 成功/stderr 捕获、checkForUpdate 全路径（npm view 参数 / install-skip / fetch 回退 / 双失败 / non-OK / 节流）、autoInstallLatest 安装路径（fixture 布局：验证通过 → ok / 语法坏入口 → 回滚上一版本 / npm 失败 → failed 不回滚不验证）
 - `tests/integration.test.ts` — +119：模块级 `setRunNpmForTest` 假 runner（headless 测试现在会 await 检查，必须 hermetic，防真实网络调用）；新增 2 个测试：headless 处理器在检查进行中（npm view 挂起）必须保持 pending、view 解析后随检查完成而结算（日志断言 `event=check latest=99.0.0 hasUpdate=true` + `install-skip`）；TUI 处理器在检查进行中立即结算
 
-## 3. Design & Implementation Notes
+## 3. 复现证据（2026-08-21）
+
+- 本机 `~/.pi/acp.log.old`：`2026-08-21T09:42:52.802Z [info] [update] event=check current=0.1.41 latest=0.1.43 hasUpdate=true`（sid=distill-test，来自 0.1.41 git checkout 工作目录的测试进程）——检测成功，安装静默跳过（checkout 不在 node_modules 下，0.1.41 无 install-skip 日志）。证实 git-checkout 部署是真实存在的失败场景。
+- 对照：`git diff v0.1.40 v0.1.41 -- src/update.ts` 与 `git diff v0.1.41 v0.1.43 -- src/update.ts` 均为空 → 非 0.1.41 代码回归，所有版本在 checkout 部署下行为一致。
+
+## 4. Design & Implementation Notes
 
 - **Entry point / key function**: `fetchLatestVersion`（`src/update.ts:156`）、`autoInstallLatest`（`src/update.ts:116`）、`checkForUpdate`（`src/update.ts:196`）
 - **保留 fetch 回退的原因**: 无 npm 的机器上直连 fetch 仍是唯一检测通道；超时放宽到 10s 降低慢网络误报
