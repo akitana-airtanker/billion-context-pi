@@ -88,6 +88,16 @@ export interface AdapterConfig {
    *  head-truncated with a notice telling the model how to see the full output
    *  (bash: read BashToolDetails.fullOutputPath). */
   toolOutputMaxBytes?: number;
+  /** Hard char cap for decompress inline mode (block decompress with
+   *  `inline: true`). When the restored block content exceeds this, inline
+   *  mode falls back to file mode (writes to the auto path + a notice + head
+   *  preview) instead of returning the full content inline. This stops a model
+   *  that inlines several large blocks in one turn from blowing the context
+   *  window — the kernel's emergency truncation protects the most recent
+   *  messages, so it cannot reach content that was just inlined. Default:
+   *  100000 (~100K chars, ~25K tokens). Set to 0 to disable (unlimited
+   *  inline). */
+  decompressInlineMaxChars?: number;
   /** Delegate sub-agent config. Accepts a boolean shorthand (`true` →
    *  `{ enabled: true }`, `false` → `{ enabled: false }`) or a DelegateConfig
    *  object. Default: enabled. */
@@ -116,6 +126,7 @@ export interface AdapterConfig {
 
 export const DEFAULT_TOOL_BASH_TIMEOUT = 60;
 export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
+export const DEFAULT_DECOMPRESS_INLINE_MAX_CHARS = 100_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
  *  and the legacy flat `displayUsage` alias. */

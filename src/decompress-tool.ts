@@ -1,6 +1,7 @@
 import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { DEFAULT_DECOMPRESS_INLINE_MAX_CHARS } from "./config.js";
 import { debug, logError, logInfo, logThrow } from "./log.js";
 import { parseBlockIdArg, collectBlockContent, type CompressionBlock } from "acp-kernel";
 import { entriesToCoreMessages } from "./messages.js";
@@ -247,7 +248,25 @@ async function handleDecompress(args: DecompressArgs, runtime: AcpRuntime, ctx: 
 
   // inline mode: return content directly. Model explicitly accepts the context
   // cost (e.g. small restorations or when it must reason over exact text).
+  // A hard char cap (decompressInlineMaxChars, default 100K) stops a model that
+  // inlines several large blocks in one turn from blowing the context window —
+  // the kernel's emergency truncation protects the most recent messages, so it
+  // cannot reach content that was just inlined. Over-cap content falls back to
+  // file mode (same as the default path below).
   if (args.inline === true && !args.toFile) {
+    const maxChars = runtime.adapter.decompressInlineMaxChars ?? DEFAULT_DECOMPRESS_INLINE_MAX_CHARS;
+    if (maxChars > 0 && text.length > maxChars) {
+      const cappedPath = autoFilePath(blockId);
+      await mkdir(AUTO_DIR, { recursive: true }).catch(() => {});
+      await writeFile(cappedPath, text, "utf8");
+      debug.event("decompress", { blockId, full, count, mode: "inline-capped", path: cappedPath, chars: text.length, maxChars });
+      logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline-capped", blockId, full, count, path: cappedPath, chars: text.length, maxChars });
+      return [
+        `Block ${blockId} (${count} item${count === 1 ? "" : "s"}, ${text.length} chars) exceeds the inline cap (${maxChars} chars) — written to ${cappedPath} instead of inline.`,
+        "Block stays compressed — context unchanged. Use the read tool to access the content.",
+        "", "Preview:", headPreview(text),
+      ].join("\n");
+    }
     debug.event("decompress", { blockId, full, count, mode: "inline" });
     logInfo("decompress", { sid: ctx.sessionManager.getSessionId(), event: "block", mode: "inline", blockId, full, count });
     return `Restored block ${blockId} (${count} item${count === 1 ? "" : "s"}) inline:\n\n${text}`;
