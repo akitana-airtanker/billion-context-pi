@@ -74,12 +74,20 @@ export interface AcpRuntime {
    *  failure (count++), success panel (>= 1 block) → reset, other non-error
    *  text → neutral (count unchanged). Returns the failure count, the
    *  toolCallId of the newest failure that still needs a retry prompt (null
-   *  when none, capped, or count 0), and whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean };
+   *  when none, capped, count 0, or the per-failure fire budget burned), the
+   *  number of fires the current failure already consumed, and one-shot
+   *  cappedNow/exhaustedNow crossing flags. */
+  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean; exhaustedNow: boolean; fires: number };
   /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
    *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
    *  nudge that would otherwise keep looping no-op compressions (issue #6). */
   compressRetryCappedFor(turnKey: string): boolean;
+  /** True when this turn has an unaddressed failure below the call cap whose
+   *  retry-prompt fire budget is burned — same emergency-nudge suppression as
+   *  the cap (a model that ignores MAX_RETRY_PROMPT_FIRES prompts in a row
+   *  would otherwise be nagged on every LLM call forever: billion-context
+   *  issue #7, ~400 re-injections/hour, usage 95%→127%). */
+  compressRetryExhaustedFor(turnKey: string): boolean;
   clearNudgeTracking(): void;
   clearCompressRetryTracking(): void;
   liveContextLimit(ctx: ExtensionContext): number;
@@ -237,6 +245,11 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
 }
 /** Max FAILED compress calls that get a retry prompt per user turn. */
 export const MAX_COMPRESS_ATTEMPTS = 3;
+/** Max LLM-call re-injections of the retry prompt for one unaddressed
+ *  failure. Without it a model that never retries is nagged on every fire
+ *  forever (billion-context issue #7: ~400 re-injections in one hour, usage
+ *  95%→127%). A NEW outcome (any class) resets the budget. */
+export const MAX_RETRY_PROMPT_FIRES = 5;
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const density = new DensityEstimator();
@@ -279,26 +292,34 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   // Failure-triggered compress retry state (see wireContextTransform): a
   // failed compress call consumed the turn's nudge budget while nothing got
   // compressed — re-prompt immediately, capped at MAX_COMPRESS_ATTEMPTS FAILED
-  // CALLS per user turn (prompt frequency within a turn is not capped: the
-  // prompt re-injects on every fire until the model retries — pi rebuilds
-  // context per LLM call, a one-shot append would vanish). The caller feeds
-  // only CURRENT-turn outcomes, so stale failures never re-prompt and the cap
-  // is always reachable; success resets the counter, neutral outcomes
-  // (non-error text that is not a success panel) leave it frozen so mixed
-  // failure modes cannot bypass the cap.
+  // CALLS per user turn. The prompt re-injects per LLM call (pi rebuilds
+  // context each fire, a one-shot append would vanish) but only for
+  // MAX_RETRY_PROMPT_FIRES consecutive fires per failure: a model that never
+  // retries must not be nagged forever (billion-context issue #7). Any NEW
+  // outcome resets the fire budget. The caller feeds only CURRENT-turn
+  // outcomes, so stale failures never re-prompt and the caps are always
+  // reachable; success resets the counter, neutral outcomes (non-error text
+  // that is not a success panel) leave it frozen so mixed failure modes
+  // cannot bypass the cap.
   const compressOutcomeSeen = new Set<string>();
   let compressFailTurnKey: string | null = null;
   let compressFailCount = 0;
+  let retryPromptFires = 0;
+  let retryExhaustedNotified = false;
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean } {
+  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; retryFor: string | null; cappedNow: boolean; exhaustedNow: boolean; fires: number } {
     if (compressFailTurnKey !== turnKey) {
       compressFailTurnKey = turnKey;
       compressFailCount = 0;
+      retryPromptFires = 0;
+      retryExhaustedNotified = false;
     }
     const prevCount = compressFailCount;
+    let sawNewOutcome = false;
     for (const o of outcomes) {
       if (compressOutcomeSeen.has(o.toolCallId)) continue;
       compressOutcomeSeen.add(o.toolCallId);
+      sawNewOutcome = true;
       if (o.isError || o.noop === true) {
         compressFailCount += 1;
       } else if (o.success) {
@@ -306,23 +327,37 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
       }
       // neutral: counter untouched
     }
+    if (sawNewOutcome) {
+      retryPromptFires = 0;
+      retryExhaustedNotified = false;
+    }
     const latest = outcomes.length > 0 ? outcomes[outcomes.length - 1] : undefined;
+    const latestFailed = latest !== undefined && (latest.isError || latest.noop === true);
     // count >= 1 guards against a deduped stale failure sliding in with a
     // reset-to-0 counter (defense in depth; the caller's turn scoping already
     // prevents it — an "attempt 0 of 3" prompt must be impossible).
-    const retryFor = latest && (latest.isError || latest.noop === true) && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS ? latest.toolCallId : null;
+    const retryFor = latestFailed && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS && retryPromptFires < MAX_RETRY_PROMPT_FIRES ? latest!.toolCallId : null;
+    if (retryFor !== null) retryPromptFires += 1;
     const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
-    return { count: compressFailCount, retryFor, cappedNow };
+    const exhaustedNow = retryFor === null && latestFailed && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS && retryPromptFires >= MAX_RETRY_PROMPT_FIRES && !retryExhaustedNotified;
+    if (exhaustedNow) retryExhaustedNotified = true;
+    return { count: compressFailCount, retryFor, cappedNow, exhaustedNow, fires: retryPromptFires };
   }
 
   function compressRetryCappedFor(turnKey: string): boolean {
     return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
   }
 
+  function compressRetryExhaustedFor(turnKey: string): boolean {
+    return compressFailTurnKey === turnKey && compressFailCount >= 1 && compressFailCount < MAX_COMPRESS_ATTEMPTS && retryPromptFires >= MAX_RETRY_PROMPT_FIRES;
+  }
+
   function clearCompressRetryTracking(): void {
     compressOutcomeSeen.clear();
     compressFailTurnKey = null;
     compressFailCount = 0;
+    retryPromptFires = 0;
+    retryExhaustedNotified = false;
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -410,4 +445,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, compressRetryExhaustedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

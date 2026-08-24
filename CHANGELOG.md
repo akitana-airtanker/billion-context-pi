@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased (master, since v0.1.38)
+- **fix(nudge): 同一失败的压缩重试提示设注入预算（≤5 次/轮）** — "从不重试"的模型让同一失败永远是最新结果，重试提示每次 context fire 重注入（用户日志 ~400 次/小时、attempt 恒 1、emergency pct 95→127%，billion-context#7）；原 3 次封顶只数不同失败调用，对该模式不可达。新增 `MAX_RETRY_PROMPT_FIRES=5`：烧尽后重试提示与 emergency nudge 一并静默（一次性 `compress-retry-exhausted` 日志 + UI 提示），任何新 compress 结果或新用户轮重置预算 (dog/billion-context#7)
 - **fix(guardrail): `toolOutputMaxBytes` 未配置时文档默认值 200000 现在实际生效** — 原接线 `if (max !== undefined && max > 0)` 把「未配置」当成「禁用」，内置 200KB 天花板永远不可达（`capToolOutput` 内部的回退到不了）；pi 只内置 cap bash/read/grep，其余工具可无限注入 context，与 CONFIGURATION.md 承诺的 ACTIVE 默认不符。改为接线层 `?? DEFAULT_TOOL_OUTPUT_MAX_BYTES` 回退，`0`/负数禁用语义不变 (#210)
 
 - **fix(compress): 接受 JSON 字符串形式的 `content` 参数** — 非严格工具 provider（vLLM openai-completions，`supportsStrictTools:false`）会把嵌套数组参数字符串化，pi 的 typebox 校验直接拒掉（`content.0: must be object`）。实测会话 01a00a38 全部唯一一次 compress 调用即死于此，3 小时会话零压缩。schema 改为 `Type.Union([Array, String])`，字符串自动 `JSON.parse` 并校验（错误信息引导模型传数组）

@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
-import { createRuntime, MAX_COMPRESS_ATTEMPTS } from "../src/runtime.js";
+import { createRuntime, MAX_COMPRESS_ATTEMPTS, MAX_RETRY_PROMPT_FIRES } from "../src/runtime.js";
 import { isCompressSuccessText, isCompressNoopText } from "../src/compress-tool.js";
 
 // Failure-triggered compress retry (session 01a00a38 post-mortem): the model's
@@ -152,6 +152,33 @@ test("noteCompressOutcomes: counts, caps, resets on success, resets per turn, ne
   assert.equal(r.retryFor, null, "no prompt without a counted failure in this turn");
 });
 
+test("noteCompressOutcomes: one unaddressed failure re-prompts at most MAX_RETRY_PROMPT_FIRES fires", () => {
+  const rt = createRuntime({});
+  const fail = (id: string) => ({ toolCallId: id, isError: true, success: false });
+
+  let prompts = 0;
+  let sawExhausted = false;
+  let last = rt.noteCompressOutcomes("u1", [fail("t0")]);
+  for (let i = 0; i < 11; i++) {
+    last = rt.noteCompressOutcomes("u1", [fail("t0")]);
+    if (last.retryFor !== null) prompts++;
+    if (last.exhaustedNow) sawExhausted = true;
+  }
+  assert.equal(prompts, MAX_RETRY_PROMPT_FIRES - 1, "first call above plus exactly MAX-1 more re-fires prompt");
+  assert.ok(sawExhausted, "exhaustion crossing is reported exactly once");
+  assert.equal(last.retryFor, null, "budget burned: no more prompt for the stale failure");
+  assert.equal(last.count, 1, "same toolCallId stays deduped");
+  assert.equal(rt.compressRetryExhaustedFor("u1"), true);
+  assert.equal(rt.compressRetryExhaustedFor("u2"), false, "exhaustion is per-turn");
+
+  // a NEW failure after exhaustion: attempt advances and the budget resets
+  const r2 = rt.noteCompressOutcomes("u1", [fail("t0"), fail("t1")]);
+  assert.equal(r2.count, 2);
+  assert.equal(r2.retryFor, "t1", "fresh budget for the new failure");
+  assert.equal(r2.fires, 1);
+  assert.equal(rt.compressRetryExhaustedFor("u1"), false, "new outcome lifts exhaustion");
+});
+
 // ─── unit: normalizeRanges via the tool ─────────────────────────────────────
 
 test("compress tool accepts JSON-encoded string content (non-strict-tool providers)", async () => {
@@ -234,6 +261,33 @@ test("failed compress toolResult triggers an immediate retry nudge that quotes t
   entries = [...entries, toolResultMsg("e4", "call_3", VALIDATION_ERR, true)];
   const r4 = await fire(handlers, ctx);
   assert.equal(retryMsgs(r4).length, 0, "cap reached → no retry nudge");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+test("retry nudge stops re-injecting once the fire budget is burned; a new failure gets a fresh budget", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 200_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-budget.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  let entries: any[] = [userMsg("e1", ZH)];
+  const ctx = fakeCtx(() => entries, stateFile);
+  await fire(handlers, ctx);
+
+  entries = [...entries, toolResultMsg("e2", "call_1", VALIDATION_ERR, true)];
+  let prompts = 0;
+  for (let i = 0; i < MAX_RETRY_PROMPT_FIRES + 3; i++) {
+    const r = await fire(handlers, ctx);
+    if (retryMsgs(r).length > 0) prompts++;
+  }
+  assert.equal(prompts, MAX_RETRY_PROMPT_FIRES, "one unaddressed failure prompts at most MAX_RETRY_PROMPT_FIRES fires");
+  const rQuiet = await fire(handlers, ctx);
+  assert.equal(retryMsgs(rQuiet).length, 0, "budget burned → silence for the stale failure");
+
+  entries = [...entries, toolResultMsg("e3", "call_2", VALIDATION_ERR, true)];
+  const rRe = await fire(handlers, ctx);
+  assert.equal(retryMsgs(rRe).length, 1, "new failure → fresh budget");
+  assert.match(retryText(rRe), /attempt 2 of 3/);
   await rm(`${stateFile}.acp.json`, { force: true });
 });
 
@@ -424,5 +478,42 @@ test("emergency nudge stops re-injecting once the turn's retry cap is burned (is
   entries = [...entries, toolResultMsg("ec4", "call_4", SUCCESS_PANEL, false)];
   const rRe = await fire(handlers, ctx);
   assert.ok(nudgeCount(rRe) >= 1, "after a successful compress the emergency nudge may resume");
+  await rm(`${stateFile}.acp.json`, { force: true });
+});
+
+test("emergency nudge quiets once the fire budget is burned by an ignored failure (issue #7 loop breaker)", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  const stateFile = "/tmp/pai-acp-retry-emerg7.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+
+  const MID = "lorem ".repeat(3000);
+  const roleMsg = (id: string, role: string, text: string) => ({
+    type: "message", id, parentId: null, timestamp: "",
+    message: { role, content: text, timestamp: Date.now() },
+  });
+  let entries: any[] = [roleMsg("e0", "user", "start " + MID)];
+  for (let i = 1; i <= 59; i++) entries.push(roleMsg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
+  const ctx = fakeCtx(() => entries, stateFile);
+  const nudgeCount = (r: any) =>
+    (r?.messages ?? []).filter((m: any) => m.role === "user" && /Context limit reached/.test(JSON.stringify(m.content))).length;
+
+  const r0 = await fire(handlers, ctx);
+  assert.ok(nudgeCount(r0) >= 1, "emergency nudge fires on real overflow");
+
+  // model answers once with a no-op compress, then ignores every retry
+  // prompt (no new outcomes — the failure stays newest forever)
+  entries = [...entries, toolResultMsg("ec1", "call_1", NOOP_PANEL, false)];
+  for (let i = 0; i < MAX_RETRY_PROMPT_FIRES + 2; i++) await fire(handlers, ctx);
+  const rQuiet = await fire(handlers, ctx);
+  assert.equal(nudgeCount(rQuiet), 0, "fire budget burned → emergency nudge no longer re-injects");
+  assert.equal(retryMsgs(rQuiet).length, 0, "retry prompts also quiet");
+
+  // a fresh compress attempt (even another no-op) resets the budget →
+  // guidance resumes so the model gets another chance
+  entries = [...entries, toolResultMsg("ec2", "call_2", NOOP_PANEL, false)];
+  const rRe = await fire(handlers, ctx);
+  assert.ok(nudgeCount(rRe) >= 1, "after a new compress attempt the emergency nudge may resume");
+  assert.equal(retryMsgs(rRe).length, 1, "fresh failure re-prompts at attempt 2");
   await rm(`${stateFile}.acp.json`, { force: true });
 });

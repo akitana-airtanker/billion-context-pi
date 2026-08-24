@@ -7,7 +7,7 @@ import type {
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
-import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
+import { createRuntime, type AcpRuntime, MAX_COMPRESS_ATTEMPTS, MAX_RETRY_PROMPT_FIRES } from "./runtime.js";
 import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./compress-tool.js";
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
@@ -322,8 +322,13 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // keeps usage pinned at emergency). Once this turn burned
       // MAX_COMPRESS_ATTEMPTS attempts, stop re-injecting the nudge — the
       // kernel's emergency truncation still shrinks context mechanically.
+      // The fire-budget exhaustion (billion-context issue #7: a model that
+      // NEVER retries keeps the same failure newest forever) gets the same
+      // suppression — without it the runaway was ~400 retry re-injections
+      // per hour with usage climbing 95%→127%.
       const retryCapped = runtime.compressRetryCappedFor(turnKey);
-      const alreadyShown = retryCapped || (!emergency && runtime.nudgeShownFor(turnKey));
+      const retryQuiet = retryCapped || runtime.compressRetryExhaustedFor(turnKey);
+      const alreadyShown = retryQuiet || (!emergency && runtime.nudgeShownFor(turnKey));
       if (!alreadyShown) {
         rebuilt.push(nudgeMessage(turn.nudge, turn.state.blocks.filter((b) => b.active), runtime.prompts));
         const rendered = renderNudgeText(turn.nudge, runtime.prompts);
@@ -346,13 +351,19 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       const failed = outcome.retryFor !== null ? compressOutcomes.find((o) => o.toolCallId === outcome.retryFor) : undefined;
       if (failed) {
         rebuilt.push(compressRetryMessage(failed.text, outcome.count, MAX_COMPRESS_ATTEMPTS));
-        logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, toolCallId: failed.toolCallId });
+        logWarn("nudge", { sid, event: "compress-retry-inject", attempt: outcome.count, max: MAX_COMPRESS_ATTEMPTS, fires: outcome.fires, fireMax: MAX_RETRY_PROMPT_FIRES, toolCallId: failed.toolCallId });
         debug.event("compress-retry-injected", { sid, turnKey, attempt: outcome.count, toolCallId: failed.toolCallId, text: failed.text.slice(0, 200) });
       } else if (outcome.cappedNow) {
         logWarn("nudge", { sid, event: "compress-retry-capped", failures: outcome.count });
         debug.event("compress-retry-capped", { sid, turnKey, failures: outcome.count });
         if (ctx.hasUI) {
           ctx.ui.notify(`[ACP] compress failed ${outcome.count}× this turn — retry prompts disabled until the next user message.`);
+        }
+      } else if (outcome.exhaustedNow) {
+        logWarn("nudge", { sid, event: "compress-retry-exhausted", failures: outcome.count, fires: outcome.fires, fireMax: MAX_RETRY_PROMPT_FIRES });
+        debug.event("compress-retry-exhausted", { sid, turnKey, failures: outcome.count });
+        if (ctx.hasUI) {
+          ctx.ui.notify(`[ACP] compress retry prompt ignored ${MAX_RETRY_PROMPT_FIRES}× this turn — retry prompts paused until a new compress attempt or the next user message.`);
         }
       }
     }
