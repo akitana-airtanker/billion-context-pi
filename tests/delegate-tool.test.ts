@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -465,4 +465,91 @@ test("async delegate with missing cwd injects FAILED instead of crashing the hos
   assert.match(sent[0]!, /FAILED/);
   assert.ok(sent[0]!.includes(runId!), "injection names the failed runId");
   assert.match(sent[0]!, /spawn error/);
+});
+
+// ─── coalesced completion notifications (#157) ──────────────────────────────
+// N delegates finishing near-simultaneously must share ONE injected message
+// (each sendUserMessage follow-up costs a model turn), and runs that were
+// delivered by other means while queued (wait/cancel) drop out of the batch.
+
+test("flushDelegateNotifications coalesces queued runs into a single message", () => {
+  resetDelegateUsage();
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) };
+  const a = mkRun("del_a", "completed", { result: { code: 0, file: "/tmp/del_a.out", body: "ok" } });
+  const b = mkRun("del_b", "failed", { timedOut: "5m limit" });
+  scheduleRunNotification(pi as any, a);
+  scheduleRunNotification(pi as any, b);
+  assert.equal(sent.length, 0, "nothing sent before the flush window elapses");
+  flushDelegateNotifications();
+  assert.equal(sent.length, 1, "exactly one coalesced message");
+  const text = sent[0]!;
+  assert.ok(text.includes("2 delegates finished"), "batch header names the count");
+  assert.ok(text.includes("1 completed, 1 FAILED"), "per-status breakdown");
+  assert.ok(text.includes("`del_a`") && text.includes("`del_b`"), "both runIds present");
+  assert.ok(text.includes("[acp_delegate completed]") && text.includes("[acp_delegate FAILED"), "per-run status headers");
+  assert.ok(text.includes("No delegates are currently running."), "trailing remaining line");
+  assert.ok(text.includes("NOT a user message"), "closing marks it automated");
+  assert.equal(a.injected, true, "del_a marked delivered");
+  assert.equal(b.injected, true, "del_b marked delivered");
+  assert.equal(a.notifyQueued, false, "queue flag cleared");
+});
+
+test("flush skips queued runs that gained a waiter or were consumed meanwhile", () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) };
+  const delivered = mkRun("del_a", "completed", { result: { code: 0, file: "/tmp/del_a.out", body: "ok" } });
+  const consumedRun = mkRun("del_b", "completed", { consumed: true });
+  const waitedRun = mkRun("del_c", "completed", { waiter: () => {} });
+  for (const r of [delivered, consumedRun, waitedRun]) scheduleRunNotification(pi as any, r);
+  flushDelegateNotifications();
+  assert.equal(sent.length, 1);
+  const text = sent[0]!;
+  assert.ok(text.includes("`del_a`"), "the unclaimed run is delivered");
+  assert.ok(!text.includes("del_b") && !text.includes("del_c"), "wait/cancel-owned runs are excluded");
+});
+
+test("failed batch send leaves runs undelivered for a later recovery carrier", () => {
+  const pi = { sendUserMessage: () => { throw new Error("queue closed"); } };
+  const a = mkRun("del_a", "completed");
+  const b = mkRun("del_b", "failed");
+  scheduleRunNotification(pi as any, a);
+  scheduleRunNotification(pi as any, b);
+  flushDelegateNotifications();
+  assert.equal(a.injected, undefined, "not marked delivered on send failure");
+  assert.equal(b.injected, undefined, "not marked delivered on send failure");
+  assert.deepEqual(findUndeliveredRuns([a, b]).map((r) => r.runId), ["del_a", "del_b"], "both recoverable");
+});
+
+test("single undelivered run flushes through the legacy single-run format", () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) };
+  const a = mkRun("del_solo", "completed", { result: { code: 0, file: "/tmp/del_solo.out", body: "ok" } });
+  scheduleRunNotification(pi as any, a);
+  flushDelegateNotifications();
+  assert.equal(sent.length, 1);
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate completed] **reviewer**"), "legacy single-run header");
+  assert.ok(text.includes("`del_solo`"), "names the run");
+  assert.ok(!text.includes("delegates finished ("), "no batch header for a single run");
+  assert.equal(a.injected, true);
+});
+
+test("findUndeliveredRuns excludes queued runs (scheduled is not lost)", () => {
+  const queued = mkRun("del_q", "completed", { notifyQueued: true });
+  const lost = mkRun("del_lost", "failed");
+  const found = findUndeliveredRuns([queued, lost]);
+  assert.deepEqual(found.map((r) => r.runId), ["del_lost"], "queued run awaits its batch, only the lost run needs recovery");
+});
+
+test("formatBatchRunSection carries the timeout note and error excerpt", () => {
+  const run = mkRun("del_t", "failed", { timedOut: "no output for 5m", result: { code: 1, file: "/tmp/del_t.out", body: "Error: provider 429" } });
+  const section = formatBatchRunSection(run);
+  assert.ok(section.includes("[acp_delegate FAILED"), "FAILED status");
+  assert.ok(section.includes("(timed out: no output for 5m)"), "timeout note");
+  assert.ok(section.includes("Error: provider 429"), "error excerpt");
+  assert.ok(section.includes("/tmp/del_t.out"), "result file path");
+  const ok = formatBatchRunSection(mkRun("del_ok", "completed", { result: { code: 0, file: "/tmp/del_ok.out", body: "hidden" } }));
+  assert.ok(ok.includes("[acp_delegate completed]"), "completed status");
+  assert.ok(!ok.includes("hidden"), "completed runs carry no body");
 });
