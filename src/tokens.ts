@@ -1,6 +1,8 @@
 import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import type { SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 import { countImageBlocks, extractText } from "./messages.js";
+import { THROTTLE_KICK_SENTINEL } from "./throttle-retry.js";
+import { DELEGATE_NOTIFY_PREFIX } from "./delegate-tool.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -55,6 +57,14 @@ export function calibrateTokens(estimate: number, density: number): number {
   return density === 1 ? estimate : Math.round(estimate * density);
 }
 
+// Synthetic user-message prefixes the injection-ledger turn key must skip.
+// These are machinery injected via pi.sendUserMessage (throttle kicks,
+// delegate notifications incl. appended recovery notices), not conversation.
+// CAUTION: any NEW synthetic sendUserMessage injection site MUST add its
+// prefix here too — otherwise it silently resets the per-turn injection
+// budgets (see wireContextTransform in src/index.ts).
+export const SYNTHETIC_USER_PREFIXES = [THROTTLE_KICK_SENTINEL, DELEGATE_NOTIFY_PREFIX] as const;
+
 /** Id of the last GENUINE user-role entry — used as the per-turn key for
  *  injection budgets. Synthetic user messages (throttle kicks, delegate
  *  notifications) are skipped: they are machinery, not conversation, and
@@ -65,7 +75,7 @@ export function lastUserMessageId(entries: { id: string; message?: { role?: stri
     const e = entries[i]!;
     if (e.message?.role !== "user") continue;
     const text = extractText(e.message.content).trimStart();
-    if (text.startsWith("[ACP:provider-throttle]") || text.startsWith("[acp_delegate ")) continue;
+    if (SYNTHETIC_USER_PREFIXES.some((p) => text.startsWith(p))) continue;
     return e.id;
   }
   return undefined;

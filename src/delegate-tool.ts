@@ -480,6 +480,12 @@ export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): 
   );
 }
 
+/** Prefix of every injected delegate notification user message
+ * (`[acp_delegate <status>] ...`). Shared with the injection-ledger turn
+ * key (SYNTHETIC_USER_PREFIXES in src/tokens.ts) so these synthetic user
+ * messages cannot reset per-turn injection budgets. */
+export const DELEGATE_NOTIFY_PREFIX = "[acp_delegate ";
+
 /** Compute the recovery notice for undelivered runs WITHOUT marking them
  *  delivered. The caller commits the marking (covered[].injected = true) only
  *  after the carrier message is actually sent: if the send throws, the runs
@@ -1141,7 +1147,7 @@ export function injectResult(
   const closing = failed
     ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
     : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
+  const header = `${DELEGATE_NOTIFY_PREFIX}${status}] **${agent}** (runId \`${runId}\`, exit ${code ?? "?"})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
   const text = formatPayload(header, file, task, failed ? body : undefined) + (recoveryText ? `\n\n${recoveryText}` : "");
   try {
