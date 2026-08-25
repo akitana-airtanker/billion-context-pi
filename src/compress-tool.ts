@@ -97,28 +97,6 @@ function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: Com
   return `${base}. content must be an ARRAY of {startId, endId, summary} objects.`;
 }
 
-/** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
-function compressPanelBlocks(text: string): number {
-  if (!text.trimStart().startsWith("▣ ACP |")) return -1;
-  const m = text.match(/, (\d+) blocks?\)/);
-  return m ? Number(m[1]) : -1;
-}
-
-/** Success = completed run that created >= 1 block (partial range errors
- *  still count: progress was made). A 0-block panel must NOT be success —
- *  it would reset the retry counter while the emergency nudge re-fires,
- *  looping no-op compressions (issue #6). */
-export function isCompressSuccessText(text: string): boolean {
-  return compressPanelBlocks(text) > 0;
-}
-
-/** No-op = completed run that compressed nothing (0-block panel: every
- *  range skipped). Counted as a FAILED attempt by noteCompressOutcomes so
- *  the retry cap applies. Non-panels ("No ranges provided.") stay neutral. */
-export function isCompressNoopText(text: string): boolean {
-  return compressPanelBlocks(text) === 0;
-}
-
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
   const byId = new Map(allBlocks.map((b) => [b.blockId, b]));

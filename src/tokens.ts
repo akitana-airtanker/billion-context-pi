@@ -1,6 +1,6 @@
 import { defaultCountTokens, type CoreMessage } from "acp-kernel";
 import type { SessionMessageEntry } from "@earendil-works/pi-coding-agent";
-import { countImageBlocks } from "./messages.js";
+import { countImageBlocks, extractText } from "./messages.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -55,12 +55,18 @@ export function calibrateTokens(estimate: number, density: number): number {
   return density === 1 ? estimate : Math.round(estimate * density);
 }
 
-/** Id of the last user-role entry — used as a per-turn key so a nudge prints at
- *  most once per turn. Returns undefined if there is no user message yet. */
-export function lastUserMessageId(entries: { id: string; message?: { role?: string } }[]): string | undefined {
+/** Id of the last GENUINE user-role entry — used as the per-turn key for
+ *  injection budgets. Synthetic user messages (throttle kicks, delegate
+ *  notifications) are skipped: they are machinery, not conversation, and
+ *  letting them rotate the turn key would reset the very budgets that bound
+ *  runaway injection loops. Returns undefined if there is no user message. */
+export function lastUserMessageId(entries: { id: string; message?: { role?: string; content?: unknown } }[]): string | undefined {
   for (let i = entries.length - 1; i >= 0; i--) {
     const e = entries[i]!;
-    if (e.message?.role === "user") return e.id;
+    if (e.message?.role !== "user") continue;
+    const text = extractText(e.message.content).trimStart();
+    if (text.startsWith("[ACP:provider-throttle]") || text.startsWith("[acp_delegate ")) continue;
+    return e.id;
   }
   return undefined;
 }

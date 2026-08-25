@@ -66,21 +66,12 @@ export interface AcpRuntime {
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
   setPrompts(prompts: Prompts): void;
-  markNudgeShown(turnKey: string): void;
-  nudgeShownFor(turnKey: string): boolean;
-  /** Process compress toolResults for the CURRENT user turn only (the caller
-   *  scopes the list — see collectCompressOutcomes in src/index.ts); idempotent
-   *  per toolCallId. Outcome classes: isError or noop (0-block panel) →
-   *  failure (count++), success panel (>= 1 block) → reset, other non-error
-    *  text → neutral (count unchanged). Returns the failure count and
-    *  whether the cap was just reached. */
-  noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean };
-  /** True when this turn already burned MAX_COMPRESS_ATTEMPTS failed/no-op
-   *  compress calls — used to stop re-injecting the (dedup-exempt) emergency
-   *  nudge that would otherwise keep looping no-op compressions (issue #6). */
-  compressRetryCappedFor(turnKey: string): boolean;
-  clearNudgeTracking(): void;
-  clearCompressRetryTracking(): void;
+  /** Single gate for every transient context injection (nudge, emergency
+   *  nudge). Counts INJECTIONS per genuine user turn against a per-kind
+   *  budget; denied calls do not increment. exhaustedNow is edge-triggered
+   *  on the injection that reaches the budget (one-shot UI notice). */
+  noteInjection(turnKey: string, kind: InjectionKind, budget: number): { allowed: boolean; count: number; exhaustedNow: boolean };
+  clearInjectionLedger(): void;
   liveContextLimit(ctx: ExtensionContext): number;
   configFor(ctx: ExtensionContext): Config;
   /** Re-read ~/.<dir>/acp.json + <cwd>/<dir>/acp.json and re-derive the adapter
@@ -234,8 +225,16 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
     if (!retainedRawIds.has(rawId)) delete state.messageRefs.byRef[ref];
   }
 }
-/** Max FAILED compress calls per user turn before the nudge circuit breaker engages. */
-export const MAX_COMPRESS_ATTEMPTS = 3;
+/** Max emergency-nudge injections per user turn. Emergency nudges re-inject
+ *  on every LLM call by design (the overflow warning must reach the model);
+ *  this budget bounds that re-injection regardless of how the model responds
+ *  — ignoring the nudge, no-op compressions, or degenerate neutral calls all
+ *  count the same: nothing. Only a new GENUINE user turn resets it. Beyond
+ *  the budget, kernel emergency truncation (>= 95% usage) remains the
+ *  mechanical backstop. */
+export const MAX_EMERGENCY_NUDGES_PER_TURN = 3;
+
+export type InjectionKind = "nudge" | "emergency";
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const density = new DensityEstimator();
@@ -251,7 +250,6 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   let adapterRef = adapter;
   let lastUserConfigKey: string | undefined;
   let promptsRef: Prompts = defaultPrompts;
-  const nudgeShownTurns = new Set<string>();
   // Per-session overflow self-heal state (learned window + armed emergency).
   const overflowEpisodes = new Map<string, OverflowEpisode>();
   function overflowFor(sid: string): OverflowEpisode {
@@ -275,47 +273,32 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     throttleEpisodes.delete(sid);
   }
 
-  // Compress-failure tracking (see wireContextTransform): counts FAILED/no-op
-  // compress calls per user turn so the nudge circuit breaker can stop
-  // re-injecting the nudge at a model that answers every nudge with another
-  // failed attempt (issue #6 emergency loop). The failed toolResult itself
-  // persists in the session log — no transient retry prompt is injected
-  // (transient re-injection per LLM call caused the #223 infinite loop). The
-  // caller feeds only CURRENT-turn outcomes; success resets the counter,
-  // neutral outcomes (non-error text that is not a success panel) leave it
-  // frozen so mixed failure modes cannot bypass the cap.
-  const compressOutcomeSeen = new Set<string>();
-  let compressFailTurnKey: string | null = null;
-  let compressFailCount = 0;
+  // Per-fire injection ledger: the ONE gate every transient context
+  // injection must pass through. Budgets count INJECTIONS — not failed
+  // calls, not distinct ids; #223 happened because a budget measured a
+  // different quantity than the injection it was supposed to bound. Reset
+  // happens ONLY on a genuine user-turn change (the caller derives the
+  // turn key from genuine user input, skipping synthetic machinery
+  // messages) or session start. Single-turn design: rollover discards the
+  // previous turn's counts, so memory is O(1) for the session lifetime.
+  let injectionTurnKey: string | null = null;
+  const injectionCounts = new Map<InjectionKind, number>();
 
-  function noteCompressOutcomes(turnKey: string, outcomes: ReadonlyArray<{ toolCallId: string; isError: boolean; success: boolean; noop?: boolean }>): { count: number; cappedNow: boolean } {
-    if (compressFailTurnKey !== turnKey) {
-      compressFailTurnKey = turnKey;
-      compressFailCount = 0;
+  function noteInjection(turnKey: string, kind: InjectionKind, budget: number): { allowed: boolean; count: number; exhaustedNow: boolean } {
+    if (injectionTurnKey !== turnKey) {
+      injectionTurnKey = turnKey;
+      injectionCounts.clear();
     }
-    const prevCount = compressFailCount;
-    for (const o of outcomes) {
-      if (compressOutcomeSeen.has(o.toolCallId)) continue;
-      compressOutcomeSeen.add(o.toolCallId);
-      if (o.isError || o.noop === true) {
-        compressFailCount += 1;
-      } else if (o.success) {
-        compressFailCount = 0;
-      }
-      // neutral: counter untouched
-    }
-    const cappedNow = compressFailCount >= MAX_COMPRESS_ATTEMPTS && prevCount < MAX_COMPRESS_ATTEMPTS;
-    return { count: compressFailCount, cappedNow };
+    const prev = injectionCounts.get(kind) ?? 0;
+    if (prev >= budget) return { allowed: false, count: prev, exhaustedNow: false };
+    const count = prev + 1;
+    injectionCounts.set(kind, count);
+    return { allowed: true, count, exhaustedNow: count >= budget };
   }
 
-  function compressRetryCappedFor(turnKey: string): boolean {
-    return compressFailTurnKey === turnKey && compressFailCount >= MAX_COMPRESS_ATTEMPTS;
-  }
-
-  function clearCompressRetryTracking(): void {
-    compressOutcomeSeen.clear();
-    compressFailTurnKey = null;
-    compressFailCount = 0;
+  function clearInjectionLedger(): void {
+    injectionTurnKey = null;
+    injectionCounts.clear();
   }
 
   async function acquireLock(sid: string): Promise<() => void> {
@@ -403,4 +386,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, noteInjection, clearInjectionLedger, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
