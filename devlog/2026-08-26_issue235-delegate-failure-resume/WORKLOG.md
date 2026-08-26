@@ -20,7 +20,7 @@
 
 | Commit | Description |
 |--------|-------------|
-| `<sha>` | feat(delegate): 失败/取消保留日志 + 失败诊断 + resumeFrom 续跑 (#235) |
+| `c1f48c5` | feat(delegate): 失败/取消保留日志 + 失败诊断 + resumeFrom 续跑 (#235) |
 
 ### Key Files
 
@@ -78,7 +78,7 @@ npm run build          # tsup
   - 并发 resume 同一 session 文件：原 run 仍 running 时已拒绝；结束后两个并发 resume 会同时 append 同一 jsonl（罕见，接受）。
   - 取消路径现在保留文件 → `~/.acp-delegate`（tmpdir）下文件累积略增（原本只保留成功/失败 run 的 `.out`）。
 - **Rollback method**:
-  - Revert commit(s): `<sha>`
+  - Revert commit(s): `c1f48c5`
   - Rollback impact: 回到失败/取消删文件、无 resumeFrom 的旧行为，无数据迁移问题。
 - **Compatibility notes** (data format, config schema): 无配置变化；`acp_delegate` 工具 schema 向后兼容（新增可选参数，`task` 放宽为可选）。
 
