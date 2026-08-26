@@ -21,6 +21,7 @@
 | Commit | Description |
 |--------|-------------|
 | `c1f48c5` | feat(delegate): 失败/取消保留日志 + 失败诊断 + resumeFrom 续跑 (#235) |
+| `<sha>` | fix(delegate): resume 二级续跑 — 每 run 独占 session 文件，resume 时 copy 原 session (#235) |
 
 ### Key Files
 
@@ -36,7 +37,7 @@
   `SESSION_EXT=".session.jsonl"`、`ACTIVITY_TAIL_CHARS=400`、`RESUME_INSTRUCTION`（resume 时的 stdin 指令文本）。
 - **Key logic explanation**:
   - pi 的 `--session <abs-path>`：文件存在则续写、不存在则在该路径新建（`SessionManager.open` → `_setSessionFile`），且 pi 会话写入是同步的（`appendFileSync`）→ 文件 crash-safe，kill 后已产生的内容都在盘上。
-  - resume 指向**原 run** 的 session 文件（`<resumeFrom>.session.jsonl`），新 run 的 `.out`/`.activity` 用新 runId。
+   - 每个 run 独占 session 文件（`<runId>.session.jsonl`）；resume 时 spawn 前 `copyFile` 原 run 的 session 到新 run 文件（历史完整带入）→ 被 resume 的 run 再失败时 `resumeFrom` 可直接指向最近 runId（写回原文件则二级续跑无文件可指，且与失败通知里的 resume 提示相矛盾）。新 run 的 `.out`/`.activity` 用新 runId。
   - 失败 body 组装顺序 = 优先级：`stderr:` → `last activity (full log: …):`（尾部 400 字符）→ `partial reply:`；`formatPayload` 里整体截断 500 字符。
   - `exitLabel(code, signal)`：code 为 null 且有信号时显示 `exit SIGTERM`（Node close 事件语义：正常退出 code 有值 signal 为 null，被杀则相反）。
   - resume 校验三关：非 pi 宿主拒绝 → 原 run 仍 running 拒绝 → session 文件不存在拒绝（fail fast，不 spawn）。
@@ -54,10 +55,10 @@ npm run build          # tsup
 ### Test Coverage
 
 - New/modified test files: `tests/delegate-tool.test.ts`
-- Test count: 439 total, 439 pass, 0 fail
+- Test count: 440 total, 440 pass, 0 fail
 - Key scenarios verified:
   - pi 宿主 cliArgs 含 `--session <...>/<runId>.session.jsonl` + `--session-dir`，无 `--no-session`；omp 保持 `--no-session`
-  - `resumeFrom` 时 session 参数指向原 run 的 session 文件
+  - `resumeFrom` 时 session 参数指向**新 run** 的 session 文件；e2e：resume spawn 前把原 session 内容 copy 到新 run 文件（内容一致）、子进程以真实 pi CLI 跑无效 session 内容正常失败并注入 FAILED
   - `exitLabel` 全部分支（0 / 1 / null+SIGTERM / null）
   - `cancelledFileNote` 含保留文件路径 + resumeFrom 提示
   - `delegateStdinText`：fresh 原样透传；resume 带指令；resume+guidance 追加
@@ -75,10 +76,10 @@ npm run build          # tsup
 
 - **Risk points**:
   - pi 子进程 CLI 参数变化（`--no-session` → `--session`）：依赖 pi 0.83 的 `--session <path>` 语义（已核对 pi 源码：缺失文件在新路径创建、存在则续写、同步落盘）。
-  - 并发 resume 同一 session 文件：原 run 仍 running 时已拒绝；结束后两个并发 resume 会同时 append 同一 jsonl（罕见，接受）。
+  - 并发 resume 同一原 run：原 run 仍 running 时已拒绝；结束后两个并发 resume 各自 copy 出独立 session 文件（无同文件并发写，产生两个分支，合理 fork 语义）。
   - 取消路径现在保留文件 → `~/.acp-delegate`（tmpdir）下文件累积略增（原本只保留成功/失败 run 的 `.out`）。
 - **Rollback method**:
-  - Revert commit(s): `c1f48c5`
+  - Revert commit(s): `c1f48c5` + 本表第二行 fix commit
   - Rollback impact: 回到失败/取消删文件、无 resumeFrom 的旧行为，无数据迁移问题。
 - **Compatibility notes** (data format, config schema): 无配置变化；`acp_delegate` 工具 schema 向后兼容（新增可选参数，`task` 放宽为可选）。
 
@@ -88,6 +89,7 @@ npm run build          # tsup
   - pi 的 `--session <abs-path>` 语义恰好满足"确定性路径 + 缺失即新建"，无需 fork 或自管 session 存储。
 - What could be improved:
   - 测试中 `injectResult` 的信号用例初版误传 `code:1 + SIGTERM`（真实语义是 code null 才有 signal），靠失败测试发现并修正。
+  - 评审发现"resume 写回原 run 文件"的二级续跑陷阱：被 resume 的 run 无自有 session 文件，其失败通知却提示 `resumeFrom: <该 runId>` → 必然 fail fast。改为每 run 独占文件 + resume 时 copy（代价：每次 resume 多一份 session 副本，tmpdir 可接受）。
 - Reusable conclusions:
   - Node `child.on("close")` 的 `(code, signal)`：正常退出 code 有值、signal 为 null；被信号杀死则 code 为 null、signal 有值。展示 exit 状态应按此组合。
 

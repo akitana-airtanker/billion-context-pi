@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { readFile, writeFile, rm } from "node:fs/promises";
+import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail } from "../src/delegate-tool.js";
@@ -520,14 +520,14 @@ test("buildChildArgs omp host keeps --no-session and no sessionFile", async () =
   assert.ok(!cliArgs.includes("--session"), "no --session on omp");
 });
 
-test("buildChildArgs resumeFrom targets the original run's session file", async () => {
+test("buildChildArgs resumeFrom targets the new run's session file", async () => {
   const { cliArgs, sessionFile } = await buildChildArgs(
     { agent: "worker", resumeFrom: "del_orig" },
     "prompt",
     mockCtx("pi"),
     "del_new",
   );
-  assert.ok(sessionFile?.endsWith("del_orig.session.jsonl"), "resume writes to the original session file");
+  assert.ok(sessionFile?.endsWith("del_new.session.jsonl"), "resume targets the new run's own session file");
   const idx = cliArgs.indexOf("--session");
   assert.equal(cliArgs[idx + 1], sessionFile);
 });
@@ -616,4 +616,45 @@ test("acp_delegate resumeFrom is rejected on non-pi hosts", async () => {
   );
   const text = (res.content[0] as { text?: string }).text ?? "";
   assert.match(text, /only supported on pi hosts/);
+});
+
+test("acp_delegate resumeFrom copies the original session into the new run's file", async () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const dir = join(tmpdir(), "acp-delegate");
+  await mkdir(dir, { recursive: true });
+  const origSession = join(dir, "del_orig235.session.jsonl");
+  const marker = "not-a-real-pi-session\n";
+  await writeFile(origSession, marker, "utf8");
+  let runId: string | undefined;
+  try {
+    const res = await tool.execute(
+      "tc-resume-copy",
+      { agent: "oracle", resumeFrom: "del_orig235", async: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const launch = (res.content[0] as { text?: string }).text ?? "";
+    runId = /new runId `(del_[a-z0-9_]+)`/.exec(launch)?.[1];
+    assert.ok(runId, `new runId in launch message: ${launch}`);
+    const newSession = join(dir, `${runId}.session.jsonl`);
+    assert.ok(existsSync(newSession), "resumed run owns its own session file");
+    assert.equal(await readFile(newSession, "utf8"), marker, "history copied from the original run");
+    // The child (real pi CLI) rejects the invalid session content and exits 1.
+    const deadline = Date.now() + 15000;
+    while (!sent.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(sent.length, 1, `one injected message, got ${JSON.stringify(sent)}`);
+    assert.match(sent[0]!, /FAILED/);
+    assert.ok(sent[0]!.includes(runId!), "injection names the resumed runId");
+  } finally {
+    await rm(origSession, { force: true });
+    if (runId) {
+      await rm(join(dir, `${runId}.session.jsonl`), { force: true });
+      await rm(join(dir, `${runId}.out`), { force: true });
+      await rm(join(dir, `${runId}.activity`), { force: true });
+    }
+  }
 });

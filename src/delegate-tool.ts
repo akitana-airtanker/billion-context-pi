@@ -4,7 +4,7 @@ import {
   type SpawnOptions,
 } from "node:child_process";
 import { createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile, rm, appendFile, readFile, copyFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import { Type, type Static } from "typebox";
@@ -772,6 +772,7 @@ async function runDelegate(
       return `Task must be a non-empty string. Got: ${JSON.stringify(args.task).slice(0, 60)}`;
     }
   }
+  let prevSession: string | null = null;
   if (args.resumeFrom) {
     if (!isPiHost(ctx.sessionManager)) {
       return `resumeFrom is only supported on pi hosts (this host has no pi session files to restore). Re-dispatch the task fresh instead.`;
@@ -780,7 +781,7 @@ async function runDelegate(
     if (prev && prev.status === "running") {
       return `Cannot resume ${args.resumeFrom}: it is still running. Wait for it to finish first.`;
     }
-    const prevSession = join(OUT_DIR, `${args.resumeFrom}${SESSION_EXT}`);
+    prevSession = join(OUT_DIR, `${args.resumeFrom}${SESSION_EXT}`);
     if (!existsSync(prevSession)) {
       return `Cannot resume ${args.resumeFrom}: no session file at ${prevSession} (the run produced no assistant output, or the file was cleaned up). Re-dispatch the task fresh instead.`;
     }
@@ -811,6 +812,11 @@ async function runDelegate(
   // (ENOENT from a missing cwd) fire 'error' before any listener attaches,
   // which escalates to an uncaughtException and kills the host process.
   await mkdir(OUT_DIR, { recursive: true });
+  if (prevSession && sessionFile) {
+    // Copy (not open) so each run owns its session file: a later resume can
+    // target this runId directly instead of the chain root.
+    await copyFile(prevSession, sessionFile);
+  }
   const child = spawn(
     process.execPath,
     [resolvePiCliEntry(process.argv[1] ?? "", process.env, isPiHost(ctx.sessionManager)), ...cliArgs],
@@ -1085,11 +1091,12 @@ export async function buildChildArgs(
   // failed/cancelled run can be resumed: `--session <path>` continues the
   // file when present and creates it when missing (pi writes entries
   // synchronously, so the file is crash-safe). `--session-dir` pins the
-  // location (user settings could otherwise redirect it). A resume targets
-  // the ORIGINAL run's session file so its history is restored. omp has no
-  // session flags and keeps `--no-session`.
+  // location (user settings could otherwise redirect it). Every run owns its
+  // own file — on resume, the earlier run's session is copied into the new
+  // run's file before spawn, so resuming the most recent runId always works.
+  // omp has no session flags and keeps `--no-session`.
   const useSession = isPiHost(ctx.sessionManager);
-  const sessionFile = useSession ? join(OUT_DIR, `${args.resumeFrom ?? runId}${SESSION_EXT}`) : null;
+  const sessionFile = useSession ? join(OUT_DIR, `${runId}${SESSION_EXT}`) : null;
   const sessionArgs = sessionFile
     ? ["--session", sessionFile, "--session-dir", OUT_DIR]
     : ["--no-session"];

@@ -27,7 +27,7 @@
 
 - **Module / data-flow changes**（全部在 `src/delegate-tool.ts`）:
   1. runId 生成前移到 `buildChildArgs` 之前；`buildChildArgs(args, rolePrompt, ctx, runId)` 返回 `sessionFile`。
-  2. 会话旗标：`useSession = isPiHost(ctx.sessionManager)` → `--session ${OUT_DIR}/<id>.session.jsonl --session-dir ${OUT_DIR}`；`<id>` = `args.resumeFrom ?? runId`（resume 写回原 run 的会话文件）。omp → 维持 `--no-session`，`sessionFile=null`。
+  2. 会话旗标：`useSession = isPiHost(ctx.sessionManager)` → `--session ${OUT_DIR}/<id>.session.jsonl --session-dir ${OUT_DIR}`；每个 run 独占一个文件，`<id>` = 本 run 的 `runId`。resume 时 spawn 前把原 run 的 session `copyFile` 到新 run 的文件（历史完整带入），从而**被 resume 的 run 再失败时也能直接 `resumeFrom` 指向它**（若写回原文件，最近 runId 无自有文件，二级续跑会 fail fast 且与通知里的 resume 提示相矛盾）。omp → 维持 `--no-session`，`sessionFile=null`。
   3. `finalize(code, signal)`：
      - 记录 `run.exitCode`/`run.exitSignal`；
      - cancelled 分支不再 `rm`：空回复时 backfill（stderr 或 "(no output)"）、`run.result = { code, file: replyFile, body }`、唤醒 waiter；
@@ -58,7 +58,7 @@
 - **Backward compatibility**: 参数向后兼容；取消语义不变（仍 SIGTERM），只是文件保留；omp 行为不变。
 - **Performance**: 父进程零新增 I/O（session 文件由子进程同步写）；失败通知 body 最多 +400 字符 activity 尾部。
 - **Cross-platform**: 路径经 `join()`；`--session` 绝对路径含分隔符 → pi 按 path 解析（已验证 resolveSessionPath）。
-- **已知边界**: ① 子进程 cwd 在 resume 时已删除 → pi 明确报错（Stored session working directory does not exist）；② 原 run 无 assistant 输出 → session 文件未创建 → resume 前置校验拒绝；③ 宿主重启后 registry 丢失，无法检测"原 run 仍 running"（仅靠 session 文件存在性），并发写同文件极罕见，接受。
+- **已知边界**: ① 子进程 cwd 在 resume 时已删除 → pi 明确报错（Stored session working directory does not exist）；② 原 run 无 assistant 输出 → session 文件未创建 → resume 前置校验拒绝；③ 宿主重启后 registry 丢失，无法检测"原 run 仍 running"（仅靠 session 文件存在性）；④ 每个 run 独占 session 文件（resume 时 copy），无并发写同文件；对同一原 run 并发 resume 产生两个独立分支（合理 fork 语义）。
 
 ## 7. Open Questions
 
