@@ -72,6 +72,20 @@ This has two practical implications:
 
 2. **Even with a single compression plugin, interference is still possible in rare cases.** Load order under Pi is determined by filesystem discovery order (`fs.readdirSync` over `.pi/extensions/` → global → packages), which is not fully deterministic. If another (non-compression) extension also hooks the `context` event and happens to load *after* billion-context-pi, it could modify the compressed output. billion-context-pi rebuilds its working set from the session log rather than the chained input, which makes it robust to handlers that run *before* it — but it cannot defend against a handler that runs *after* it. This is a limitation of Pi's extension model; if you observe unexpected context behavior, check whether other installed extensions intercept the `context` event.
 
+## Host support
+
+billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-coding-agent`) and detects the host at session start:
+
+- **Pi** — fully supported.
+- **OMP (`can1357/oh-my-pi`)** — **not supported.** OMP's in-process session API diverges from Pi's, so the compression refs the extension injects can drift out of sync with the session's real refs and `compress` calls fail with `does not exist in this session` (issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234)). On OMP the extension now **refuses service**: it prints a warning, disables the ACP tools, and leaves the host's own context handling untouched.
+
+  **Use [billion-context](https://github.com/ranxianglei/billion-context) instead** — it runs the same compression pipeline server-side in a proxy, so the refs never diverge:
+
+  ```bash
+  npm install -g billion-context
+  bili omp -- -p "your task"   # run OMP through the proxy
+  ```
+
 ## Model-facing tools
 
 | Tool | What it does |

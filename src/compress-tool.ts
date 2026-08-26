@@ -9,6 +9,7 @@ import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -53,6 +54,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
     ],
     parameters: CompressParams,
     async execute(toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
         result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);

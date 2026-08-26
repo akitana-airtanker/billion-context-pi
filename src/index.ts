@@ -34,6 +34,7 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -46,7 +47,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       return;
     }
     const runtime = createRuntime(adapter);
-    wireCompactionDisable(pi);
+    wireCompactionDisable(pi, runtime);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -66,9 +67,13 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 export default createAcpExtension();
 
 // ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
-// opencode-acp requiring opencode's compaction.auto = false).
-function wireCompactionDisable(pi: ExtensionAPI): void {
-  pi.on("session_before_compact", () => ({ cancel: true }));
+// opencode-acp requiring opencode's compaction.auto = false). On a refused host
+// (OMP) we stand down and let the host compact normally instead.
+function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("session_before_compact", () => {
+    if (runtime.refused) return;
+    return { cancel: true };
+  });
 }
 
 // (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
@@ -76,7 +81,25 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 // consumes the follow-up queue naturally — no shutdown drain needed.)
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
+    // OMP (oh-my-pi) is not supported: its in-process live-entries integration
+    // diverges the nudge's example refs from the session's real refs, so
+    // compress calls fail with "does not exist in this session". Stand down —
+    // refuse service and point the user at the billion-context proxy. session_start
+    // always precedes the first context/before_agent_start event, so setting
+    // `refused` here reliably gates every downstream handler for the session.
+    if (isOmpHost(ctx.sessionManager)) {
+      runtime.refused = true;
+      if (!ompWarned) {
+        ompWarned = true;
+        const sid = ctx.sessionManager.getSessionId();
+        logWarn("host", { event: "omp-unsupported", sid, action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(OMP_UNSUPPORTED_MESSAGE, "warning");
+        else console.error(OMP_UNSUPPORTED_MESSAGE);
+      }
+      return;
+    }
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
@@ -131,6 +154,10 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // nudge decision) and return the transformed AgentMessage[].
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
+    // Refused host (OMP): leave the context completely untouched — no ref tags,
+    // no compression, no nudge. Returning undefined makes pi send the original
+    // messages verbatim.
+    if (runtime.refused) return;
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
@@ -348,6 +375,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
+    // Refused host (OMP): don't inject the ACP system prompt — the model must
+    // not learn about compress/decompress on a host where they can't work.
+    if (runtime.refused) return;
     const delegate = runtime.adapter.delegate !== false;
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;
