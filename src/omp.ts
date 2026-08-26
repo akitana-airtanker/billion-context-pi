@@ -26,6 +26,6 @@ export const OMP_UNSUPPORTED_MESSAGE = [
   "The in-process compression path is unreliable on OMP: the nudge's example refs diverge from the session's real refs, so compress calls fail with \"does not exist in this session\".",
   "Use the billion-context proxy instead — it runs compression server-side and works on OMP:",
   "  npm install -g billion-context",
-  "  bili omp -- -p \"your task\"",
+  "  bili omp",
   "Docs: https://github.com/ranxianglei/billion-context",
 ].join("\n");

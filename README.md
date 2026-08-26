@@ -22,6 +22,8 @@ The model decides <em>when</em> and <em>what</em> to compress — not a hard lim
 
 ---
 
+> **Host support:** this plugin is for **Pi**. It does **not** support **OMP (oh-my-pi)** — on an OMP host it refuses to run. OMP users: use [billion-context](https://github.com/ranxianglei/billion-context) instead (`bili omp`). Details: [docs/omp.md](./docs/omp.md).
+
 ## Why?
 
 When conversations get long, the model runs out of context. Most tools hard-truncate — silently dropping earlier messages. **billion-context** gives the model a `compress` tool: the LLM decides **when** and **what** to compress into high-fidelity summaries, preserving critical details (file paths, decisions, error strings) while reclaiming context space.
@@ -83,8 +85,10 @@ billion-context-pi is built for the **Pi** coding agent (`@earendil-works/pi-cod
 
   ```bash
   npm install -g billion-context
-  bili omp -- -p "your task"   # run OMP through the proxy
+  bili omp   # run OMP through the proxy
   ```
+
+  Full details: [docs/omp.md](./docs/omp.md).
 
 ## Model-facing tools
 
