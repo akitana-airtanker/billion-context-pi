@@ -21,7 +21,7 @@
 | Commit | Description |
 |--------|-------------|
 | `c1f48c5` | feat(delegate): 失败/取消保留日志 + 失败诊断 + resumeFrom 续跑 (#235) |
-| `<sha>` | fix(delegate): resume 二级续跑 — 每 run 独占 session 文件，resume 时 copy 原 session (#235) |
+| `6988df0` | fix(delegate): resume 二级续跑 — 每 run 独占 session 文件，resume 时 copy 原 session (#235) |
 
 ### Key Files
 
