@@ -16,7 +16,7 @@ import { makeCompressTool, isCompressSuccessText, isCompressNoopText } from "./c
 import { makeDecompressTool } from "./decompress-tool.js";
 import { makeSearchTool } from "./search-tool.js";
 import { makeStatusTool } from "./status-tool.js";
-import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage } from "./delegate-tool.js";
+import { makeDelegateTool, makeDelegateWaitTool, makeDelegateCancelTool, runningRunsSnapshot, resetDelegateUsage, setDelegateDisplayUsage, setDelegateNotifyIfRead, markDelegateResultRead, markDelegateRunReadByCommand } from "./delegate-tool.js";
 import { makeCommands } from "./commands.js";
 import { coreOutToAgentMessages, extractText } from "./messages.js";
 import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
@@ -56,6 +56,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     }
     const runtime = createRuntime(adapter);
     wireCompactionDisable(pi, runtime);
+    wireDelegateReadTracking(pi);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -111,6 +112,24 @@ function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // in pi, and interactive/rpc sessions are long-lived so their main loop
 // consumes the follow-up queue naturally — no shutdown drain needed.)
 
+// Read-tracking for delegate completion notifications (notifyIfRead: "skip"):
+// when the model reads a delegate's result file, mark the run as read so the
+// completion notification is skipped if the run finishes after that read.
+// Registered once per process; the runs registry is per-process, so delegate
+// child processes (nested delegates) track their own runs independently.
+function wireDelegateReadTracking(pi: ExtensionAPI): void {
+  pi.on("tool_result", (event) => {
+    if (event.isError) return;
+    if (event.toolName === "read") {
+      const p = (event.input as { path?: unknown }).path;
+      if (typeof p === "string") markDelegateResultRead(p);
+    } else if (event.toolName === "bash") {
+      const cmd = (event.input as { command?: unknown }).command;
+      if (typeof cmd === "string") markDelegateRunReadByCommand(cmd);
+    }
+  });
+}
+
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
@@ -146,7 +165,9 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
       await runtime.reloadConfig(ctx.cwd);
-      setDelegateDisplayUsage(resolveDelegate(runtime.adapter).displayUsage);
+      const delegateCfg = resolveDelegate(runtime.adapter);
+      setDelegateDisplayUsage(delegateCfg.displayUsage);
+      setDelegateNotifyIfRead(delegateCfg.notifyIfRead);
     } catch (e) {
       logThrow("config", e, { sid, phase: "session_start" });
     }

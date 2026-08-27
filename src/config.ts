@@ -13,6 +13,12 @@ export interface DelegateConfig {
    *  "merged" — delegate token usage folded into the tool-result usage field,
    *  counted as part of the main session totals. */
   displayUsage?: "merged" | "separate";
+  /** What happens to the completion notification when the model has already
+   *  read the delegate's result file after the run finished.
+   *  "skip" (default) — the notification is not injected; the model already
+   *  saw the result, so re-injecting it would only waste context.
+   *  "always" — always inject the notification (previous behavior). */
+  notifyIfRead?: "skip" | "always";
 }
 
 /** Compression tuning fields, shared by all three levels (global, provider,
@@ -125,17 +131,19 @@ export const DEFAULT_TOOL_OUTPUT_MAX_BYTES = 200_000;
 
 /** Resolve delegate config from the adapter, handling the boolean shorthand
  *  and the legacy flat `displayUsage` alias. */
-export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; displayUsage: "merged" | "separate" } {
+export function resolveDelegate(adapter: AdapterConfig): { enabled: boolean; displayUsage: "merged" | "separate"; notifyIfRead: "skip" | "always" } {
   const d = adapter.delegate;
   if (typeof d === "object" && d !== null) {
     return {
       enabled: d.enabled !== false,
       displayUsage: d.displayUsage ?? adapter.displayUsage ?? "separate",
+      notifyIfRead: d.notifyIfRead ?? "skip",
     };
   }
   return {
     enabled: d !== false,
     displayUsage: adapter.displayUsage ?? "separate",
+    notifyIfRead: "skip",
   };
 }
 
