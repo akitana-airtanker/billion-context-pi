@@ -7,8 +7,9 @@ import type {
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
+import { defaultCountTokens, parseCompressArgs, resolveBoundaries, type CompressionBlock, type CompressParseDiagnostics, type CoreMessage, type CompressionState } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
+import { buildSummarizeSystemPrompt, truncateContent } from "./compress-model.js";
 
 function formatK(n: number): string {
   return n >= 1000 ? `${(n / 1000).toFixed(1)}K` : String(n);
@@ -38,12 +39,33 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
+/** Tool description is dynamic: when a dedicated compression model is
+ *  configured, the main model only chooses ranges and passes a minimal
+ *  placeholder summary (the compression model writes the real one) — saving the
+ *  main model's output tokens. Without one, the main model writes full summaries. */
+function compressDescription(ref: string | undefined): string {
+  if (ref) {
+    return (
+      "Replace older conversation ranges with summaries. A dedicated compression model (" + ref +
+      ") writes the summaries — you only choose the ranges. Pass a MINIMAL placeholder for each range's `summary` " +
+      "(e.g. \"compressed\"); it will be replaced by the compression model. Do NOT write a full summary. " +
+      "Single range: compress({ content: [{ startId, endId, summary: \"compressed\" }] }). " +
+      "Batch: compress({ content: [{ topic, startId, endId, summary: \"compressed\" }, ...] })."
+    );
+  }
+  return (
+    "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). " +
+    "Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary."
+  );
+}
+
 export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof CompressParams> {
   return {
     name: "compress",
     label: "Compress",
-    description:
-      "Replace older conversation ranges with detailed summaries you write. Single range: compress({ content: [{ startId, endId, summary }] }). Batch: compress({ content: [{ topic, startId, endId, summary }, ...] }) — each entry gets its own summary.",
+    get description() {
+      return compressDescription(runtime.getCompressionModelRef());
+    },
     promptSnippet: "compress({ content: [{ startId, endId, summary }] }) or batch multiple ranges",
     promptGuidelines: [
       "Each message has an acp tag with its mNNNNN ref, token size, and type. Compress ranges by their refs.",
@@ -172,6 +194,42 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
+  // Dedicated compression model: if configured and resolvable, generate each
+  // range's summary with the external model (the main model only passed a
+  // placeholder). On any failure, fall back to the main model's summary for
+  // that range so the session is never interrupted.
+  const compressionRef = runtime.getCompressionModelRef();
+  let compressionNote: string | null = null;
+  let compressionWarn = false;
+  if (compressionRef) {
+    const resolved = await runtime.compressionModel.resolveModel(compressionRef);
+    if (!resolved.model) {
+      compressionNote = `compression model "${compressionRef}" not resolvable in models.json — using main model summaries`;
+      compressionWarn = true;
+      logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "compression-model-unresolved", ref: compressionRef });
+    } else {
+      const systemPrompt = buildSummarizeSystemPrompt(runtime.prompts, topLevelTopic);
+      const maxTokens = Math.max(256, Math.ceil((summaryMaxChars ?? 20000) / 3));
+      let used = 0;
+      for (const r of ranges) {
+        const content = extractRangeContent(messages, state, r.startId, r.endId);
+        if (!content) continue; // cannot extract — keep the main model's summary
+        try {
+          r.summary = await runtime.compressionModel.summarize(resolved.model, truncateContent(content, 120000), systemPrompt, maxTokens);
+          used += 1;
+        } catch (e) {
+          logWarn("compress", { sid: ctx.sessionManager.getSessionId(), event: "compression-model-failed", ref: compressionRef, error: e instanceof Error ? e.message : String(e) });
+        }
+      }
+      if (used > 0) {
+        compressionNote = `summaries written by ${resolved.model.provider}/${resolved.model.id} (${used}/${ranges.length} ranges)`;
+      } else {
+        compressionNote = `compression model "${compressionRef}" produced no summaries — using main model summaries`;
+        compressionWarn = true;
+      }
+    }
+  }
+
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
     modelId,
@@ -255,7 +313,28 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   }
 
   const lines = [`▣ ACP | ${formatK(beforeTokens)} → ${formatK(afterTokens)} tokens (~${formatK(reclaimed)} reclaimed, ${blocksCreated} block${blocksCreated > 1 ? "s" : ""})`];
+  if (compressionNote) lines.push((compressionWarn ? "⚠️ " : "ℹ️ ") + compressionNote);
   if (warnings.length > 0) lines.push("⚠️ " + warnings.join("; "));
   if (errors.length > 0) lines.push("Errors: " + errors.join("; "));
   return lines.join("\n");
+}
+
+function formatCoreMessage(m: CoreMessage): string {
+  const text = m.text ?? "";
+  if (m.contentType === "tool-call") return `[${m.role}:${m.toolName ?? "tool"} call] ${text}`;
+  if (m.contentType === "tool-result") return `[${m.role}:${m.toolName ?? "tool"} result] ${text}`;
+  return `[${m.role}] ${text}`;
+}
+
+/** Raw transcript of the messages in [startId, endId] (fed to the compression
+ *  model). Returns null when the range cannot be resolved. */
+function extractRangeContent(messages: CoreMessage[], state: CompressionState, startId: string, endId: string): string | null {
+  try {
+    const range = resolveBoundaries({ startRef: startId, endRef: endId, messages, state });
+    const slice = messages.slice(range.startIndex, range.endIndex + 1);
+    if (slice.length === 0) return null;
+    return slice.map(formatCoreMessage).join("\n\n");
+  } catch {
+    return null;
+  }
 }

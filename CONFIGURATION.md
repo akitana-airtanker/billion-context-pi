@@ -99,6 +99,7 @@ All keys below are currently **ACTIVE**.
 | `toolBashDefaultTimeout` | number | `60` | 🟢 ACTIVE | Default `bash` tool timeout in seconds when the model omits it. |
 | `toolOutputMaxBytes` | number | `200000` | 🟢 ACTIVE | Hard byte cap on tool result text. |
 | `throttleRetry` | boolean \| object | `true` | 🟢 ACTIVE | Auto-retry provider token rate-limit errors with progressive backoff. |
+| `compressionModelId` | string | *(unset)* | 🟢 ACTIVE | Id (or `provider/id`) of a `models.json` model that writes `compress` summaries instead of the main model. Usually set via `/acp compact <id>`. |
 
 **Delegate keys**
 
@@ -337,6 +338,39 @@ The provider key is the **Pi provider name** (e.g. `"anthropic"`, `"openai"`, `"
 ```
 
 On `anthropic` / `claude-sonnet-4-5` the effective thresholds become `maxContextLimit=70%`, `nudgeGrowthTokens=30000`, and `emergencyThresholdPercent=95%` (inherited from global).
+
+---
+
+## Compression Model
+
+The `compressionModelId` key designates a **dedicated model** that writes the `compress` tool's summaries, so your main model spends no output tokens on them. It reuses the model credentials (provider, `baseUrl`, `apiKey`) already defined in Pi's `~/.pi/agent/models.json` — there is nothing extra to configure.
+
+### `compressionModelId`
+
+- **Type:** `string`
+- **Default:** *(unset — the main model writes summaries)*
+- **Status:** 🟢 ACTIVE
+- **Description:** The id (or `provider/id`) of the model used to write compression summaries. When set, each `compress` call sends the range's content to this model to produce the summary; the main model's own summary is kept only as a fallback. When unset, the main model writes the summaries itself (the default).
+
+  **Recommended way to set it:** the `/acp compact` command, which validates the id against `models.json` and persists it for you:
+
+  ```
+  /acp compact            # show current + list models.json models
+  /acp compact <id>       # set (e.g. /acp compact qwen-mini or /acp compact openai/gpt-4o-mini)
+  /acp compact reset      # clear → fall back to the main model
+  ```
+
+  You can also set it directly in `acp.json`:
+
+  ```json
+  { "compressionModelId": "openai/gpt-4o-mini" }
+  ```
+
+  **Resolution:** a bare id (`qwen-mini`) is matched against the models in `models.json`; if the same id exists under several providers the `provider/id` form is required. The model must have a working API key (in `models.json` or `~/.pi/agent/auth.json`).
+
+  **Fallback (guaranteed):** if the configured model cannot be resolved, or its API call fails (network error, timeout, API error, empty response), the extension logs a warning and uses the **main model's summary** for that range instead. Compression never blocks or interrupts the session.
+
+  **Scope:** read like any other `acp.json` key (global `~/.pi/acp.json`, with a project `<project>/.pi/acp.json` overriding it per-field). The `/acp compact` command writes to the **global** file.
 
 ---
 

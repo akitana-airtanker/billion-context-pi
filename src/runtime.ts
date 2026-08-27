@@ -12,7 +12,8 @@ import { resolveConfig, type AdapterConfig } from "./config.js";
 import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
-import { loadUserConfig, applyUserConfig } from "./user-config.js";
+import { loadUserConfig, applyUserConfig, saveCompressionModelId } from "./user-config.js";
+import { CompressionModelClient } from "./compress-model.js";
 import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
@@ -97,6 +98,13 @@ export interface AcpRuntime {
    *  the map entry so a long-lived process cycling through many sessions
    *  doesn't accumulate them. */
   overflowDrop(sid: string): void;
+  /** Client for the dedicated compression model (reads models.json). */
+  compressionModel: CompressionModelClient;
+  /** The configured compression model ref, or undefined (main model writes). */
+  getCompressionModelRef(): string | undefined;
+  /** Persist the compression model ref to ~/.pi/acp.json and update the
+   *  in-memory adapter so it takes effect immediately. null clears it. */
+  setCompressionModelRef(value: string | null): Promise<void>;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -245,6 +253,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     countTokens: (text) => density.estimateWithDensity(countModelId, text),
   });
   const store = new SessionStateStore();
+  const compressionModel = new CompressionModelClient();
   const lastActiveBlockIds = new Map<string, Set<string>>();
   const locks = new Map<string, Promise<void>>();
   const factoryAdapter = adapter;
@@ -339,6 +348,21 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     return resolveConfig(adapterRef, liveContextLimit(ctx), m?.provider, m?.id);
   }
 
+  function getCompressionModelRef(): string | undefined {
+    return adapterRef.compressionModelId;
+  }
+
+  async function setCompressionModelRef(value: string | null): Promise<void> {
+    await saveCompressionModelId(value);
+    const next: AdapterConfig = { ...adapterRef };
+    if (value === null) delete next.compressionModelId;
+    else next.compressionModelId = value;
+    adapterRef = next;
+    // Force the next reloadConfig to re-read (the file now differs from the
+    // cached key), keeping disk and memory in sync across sessions.
+    lastUserConfigKey = undefined;
+  }
+
   async function reloadConfig(cwd: string): Promise<void> {
     let user;
     try {
@@ -403,4 +427,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     lastActiveBlockIds.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop, compressionModel, getCompressionModelRef, setCompressionModelRef };}

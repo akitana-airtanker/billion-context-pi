@@ -134,6 +134,24 @@ Blocks: 3 active (3.7K summary, 15.2K original compressed)
   b3 (T2)  3.3K→1.0K  age=1m  "Architecture review"
 ```
 
+## `/acp compact` — dedicated compression model
+
+By default the `compress` tool's summaries are written by your **main model** — it spends output tokens producing them. If you'd rather offload summary-writing to a cheaper model (a small Qwen, `gpt-4o-mini`, …), point billion-context at one of the models you have already configured in Pi's `~/.pi/agent/models.json` — no extra `baseUrl`/`apiKey` to duplicate:
+
+```
+/acp compact            # show the current compression model + list available models
+/acp compact <id>       # set <id> (or <provider>/<id>) as the compression model
+/acp compact reset      # clear it — fall back to the main model
+```
+
+- **No argument** (`/acp compact`): shows the currently configured compression model (or "not set — the main model writes summaries") and lists the model ids available in `models.json` for reference.
+- **`/acp compact <id>`**: sets the compression model. Accepts a bare id (`qwen-mini`) or an explicit `provider/id` (`openai/gpt-4o-mini`). The choice is persisted to `~/.pi/acp.json` (`compressionModelId`) and applies across sessions.
+- **`/acp compact reset`**: clears the setting; compression falls back to the main model (the default behavior).
+
+When a compression model is set, each `compress` call sends the range's content to that model to produce the summary, so the **main model spends no output tokens** on summaries. If the call fails (network error, API error, empty response), the extension **falls back to the main model's summary** for that range — compression never blocks the session.
+
+> The model must have a working API key (in `models.json` or `~/.pi/agent/auth.json`). See [CONFIGURATION.md](./CONFIGURATION.md#compressionmodelid) for details.
+
 ## `/acp-subagents` command
 
 **Optional, one-time setup — only if you also use [pi-subagents](https://github.com/nicobailon/pi-subagents).**
