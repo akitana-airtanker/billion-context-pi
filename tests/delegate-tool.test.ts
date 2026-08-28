@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool } from "../src/delegate-tool.js";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -288,7 +288,7 @@ const USAGE_FIXTURE = { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, tot
 test("injectResult accumulates usage in separate mode when unreported", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", false);
   assert.equal(ok, true, "injection succeeds");
   const total = getDelegateUsage();
   assert.ok(total, "usage accumulated into session total");
@@ -299,7 +299,7 @@ test("injectResult accumulates usage in separate mode when unreported", () => {
 test("injectResult does not double-accumulate when usage already reported", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", true);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", true);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "no accumulation when already reported");
 });
@@ -307,7 +307,7 @@ test("injectResult does not double-accumulate when usage already reported", () =
 test("injectResult merged mode injects without accumulating", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "merged", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "merged", false);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "merged mode never accumulates");
 });
@@ -315,13 +315,13 @@ test("injectResult merged mode injects without accumulating", () => {
 test("injectResult without usage leaves cumulative total undefined", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, undefined, "separate", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, undefined, "separate", false);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "no usage, no accumulation");
 });
 
 test("injectResult returns false when sendUserMessage unavailable", () => {
-  const ok = injectResult({} as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out");
+  const ok = injectResult({} as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out");
   assert.equal(ok, false, "no sendUserMessage means no injection");
 });
 
@@ -368,7 +368,7 @@ function capturePi(sent: string[]): { sendUserMessage: (text: string) => void } 
 
 test("injectResult failed run uses a loud FAILED header and carries the error excerpt", () => {
   const sent: string[] = [];
-  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 1, "/tmp/del_x.out", undefined, undefined, "separate", false, "Error: provider 429");
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "failed", 1, "/tmp/del_x.out", undefined, undefined, "separate", false, "Error: provider 429");
   assert.equal(ok, true, "injection succeeds");
   const text = sent[0]!;
   assert.ok(text.includes("[acp_delegate FAILED"), "FAILED header");
@@ -380,12 +380,74 @@ test("injectResult failed run uses a loud FAILED header and carries the error ex
 
 test("injectResult completed run keeps the completed header and no body", () => {
   const sent: string[] = [];
-  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 0, "/tmp/del_x.out", undefined, undefined, "separate", false, "must not appear");
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "completed", 0, "/tmp/del_x.out", undefined, undefined, "separate", false, "must not appear");
   assert.equal(ok, true, "injection succeeds");
   const text = sent[0]!;
   assert.ok(text.includes("[acp_delegate completed]"), "completed header unchanged");
   assert.ok(!text.includes("FAILED"), "no FAILED marker");
   assert.ok(!text.includes("must not appear"), "completed runs carry no body");
+});
+
+// ─── #244: watchdog null-code finalize must not misreport FAILED ───────────
+// The watchdog/EOF grace kills the child (or it never exits), so close fires
+// with code === null even when the .out result is complete. finalize derives
+// run.status from the effective exit code; the notification must follow
+// run.status, never re-derive failure from the raw null code.
+
+test("effectiveExitCode: null code with delivered output counts as completed", () => {
+  assert.equal(effectiveExitCode(null, "full report", ""), 0, "non-empty output → 0");
+  assert.equal(effectiveExitCode(null, "", "stderr text"), 0, "non-empty stderr → 0");
+  assert.equal(effectiveExitCode(null, "", ""), null, "no output at all → null (genuine failure)");
+  assert.equal(effectiveExitCode(0, "", ""), 0, "real exit 0 untouched");
+  assert.equal(effectiveExitCode(1, "partial", ""), 1, "real non-zero code untouched");
+});
+
+test("injectResult null code + completed status: completed header, exit ?, no missing-result warning", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "completed", null, "/tmp/del_x.out", "output ended but process did not exit", undefined, "separate", false);
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate completed]"), "completed header despite null code");
+  assert.ok(text.includes("exit ?"), "raw null code kept as diagnostic");
+  assert.ok(text.includes("output ended but process did not exit"), "watchdog reason kept as diagnostic");
+  assert.ok(!text.includes("FAILED"), "no FAILED marker");
+  assert.ok(!text.includes("did NOT complete"), "no result-missing warning");
+  assert.ok(!text.includes("re-dispatch"), "no re-dispatch pressure");
+});
+
+test("injectResult null code + failed status: still a loud FAILED", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "failed", null, "/tmp/del_x.out", undefined, undefined, "separate", false, "(no output)");
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate FAILED"), "FAILED header for genuine failure");
+  assert.ok(text.includes("exit ?"), "null code shown as ?");
+  assert.ok(text.includes("did NOT complete"), "result-missing warning kept for real failures");
+});
+
+test("watchdog null-code completed run: direct, wait, and recovery paths agree", () => {
+  const run = mkRun("del_w", "completed", {
+    exitCode: null,
+    result: { code: null, file: "/tmp/del_w.out", body: "full report" },
+  });
+  // direct notification path
+  const sent: string[] = [];
+  injectResult(capturePi(sent) as any, run.agent, run.runId, run.task, run.status, run.exitCode, run.result.file, "output ended but process did not exit", undefined, "separate", false);
+  const direct = sent[0]!;
+  assert.ok(direct.includes("[acp_delegate completed]"), "direct: completed");
+  assert.ok(!direct.includes("FAILED"), "direct: no FAILED");
+  assert.ok(!direct.includes("did NOT complete"), "direct: no missing-result warning");
+
+  // wait path
+  const waitText = formatRunResult(run);
+  assert.ok(waitText.includes("completed"), "wait: completed");
+  assert.ok(!waitText.includes("FAILED"), "wait: no FAILED");
+
+  // recovery path
+  const { text: recText } = buildRecoveryNotice([run], undefined);
+  assert.ok(recText.includes("completed"), "recovery: completed");
+  assert.ok(!recText.includes("FAILED"), "recovery: no FAILED");
+  assert.ok(!recText.includes("missing"), "recovery: no missing-work warning");
 });
 
 // ─── undelivered recovery (#16) ─────────────────────────────────────────────
