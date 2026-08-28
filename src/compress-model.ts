@@ -3,6 +3,12 @@ import * as path from "node:path";
 import { ModelRuntime, getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { Api, AssistantMessage, Context, Model, ModelsApiStreamOptions } from "@earendil-works/pi-ai";
 
+/** Sentinel compressionModelId value meaning "use the session's own model".
+ *  The compression call reuses the session's prompt prefix (system prompt +
+ *  tools + messages) so it hits the provider's prompt cache — isolation without
+ *  a cheaper model. Distinct from a models.json ref (which is "provider/id"). */
+export const SESSION_MODEL_REF = "session";
+
 /** A model defined in models.json, addressed by provider + id. */
 export interface CompressionModelInfo {
   provider: string;
@@ -127,13 +133,11 @@ export class CompressionModelClient {
     return { model: null, ambiguous: all };
   }
 
-  /** Generate a summary of `content` with the resolved model. Throws on API
+  /** Generate a summary with the resolved model from a FULLY BUILT context
+   *  (the caller controls systemPrompt/messages/tools — used for both the
+   *  fresh single-message prompt and the shared-prefix prompt). Throws on API
    *  error or an empty response — the caller falls back to the main model. */
-  async summarize(resolved: ResolvedCompressionModel, content: string, systemPrompt: string, maxTokens: number): Promise<string> {
-    const context: Context = {
-      systemPrompt,
-      messages: [{ role: "user", content, timestamp: Date.now() }],
-    };
+  async summarizeContext(resolved: ResolvedCompressionModel, context: Context, maxTokens: number): Promise<string> {
     const msg = await this.complete(resolved.model, context, { maxTokens });
     if (msg.stopReason === "error") throw new Error(msg.errorMessage ?? "compression model returned an error");
     const text = msg.content
@@ -143,6 +147,16 @@ export class CompressionModelClient {
     const trimmed = text.trim();
     if (!trimmed) throw new Error("compression model returned an empty summary");
     return trimmed;
+  }
+
+  /** Generate a summary of `content` with the resolved model using a fresh
+   *  single-message prompt (no session prefix reuse). */
+  async summarize(resolved: ResolvedCompressionModel, content: string, systemPrompt: string, maxTokens: number): Promise<string> {
+    const context: Context = {
+      systemPrompt,
+      messages: [{ role: "user", content, timestamp: Date.now() }],
+    };
+    return this.summarizeContext(resolved, context, maxTokens);
   }
 }
 

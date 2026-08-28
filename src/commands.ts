@@ -6,6 +6,7 @@ import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImage
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
+import { SESSION_MODEL_REF } from "./compress-model.js";
 
 declare const CURRENT_VERSION: string;
 
@@ -41,7 +42,7 @@ export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options
       options: {
         description:
           "Show ACP context usage, token breakdown, and compression status. " +
-          "Subcommand: /acp compact [model-id|reset] to manage the dedicated compression model.",
+          "Subcommand: /acp compact [session|model-id|reset] to manage the dedicated compression model.",
         handler: async (args, ctx) => {
           const argStr = commandArgString(args);
           const first = argStr.trim().split(/\s+/)[0];
@@ -199,9 +200,14 @@ async function handleCompact(args: string, runtime: AcpRuntime, ctx: ExtensionCo
         : "  (no models found in models.json)";
       return (
         "Compression model: NOT SET — the main model writes summaries (default).\n\n" +
+        "Options:\n" +
+        `  /acp compact ${SESSION_MODEL_REF}   — use the session's own model, reusing its prompt prefix (prompt-cache friendly)\n` +
         `Available models in models.json:\n${list}\n\n` +
         "Set one with: /acp compact <model-id>"
       );
+    }
+    if (current === SESSION_MODEL_REF) {
+      return "Compression model: session — the session's own model writes summaries, reusing its prompt prefix (prompt-cache friendly). Falls back to the main model on error.\nReset with: /acp compact reset";
     }
     const resolved = await client.resolveModel(current);
     if (resolved.model) {
@@ -214,6 +220,10 @@ async function handleCompact(args: string, runtime: AcpRuntime, ctx: ExtensionCo
   if (target === "reset") {
     await runtime.setCompressionModelRef(null);
     return "Compression model cleared — reverting to main-model compression.";
+  }
+  if (target === SESSION_MODEL_REF) {
+    await runtime.setCompressionModelRef(SESSION_MODEL_REF);
+    return "Compression model set to session — the session's own model writes summaries, reusing its prompt prefix (prompt-cache friendly). Falls back to the main model on error.";
   }
 
   const resolved = await client.resolveModel(target);

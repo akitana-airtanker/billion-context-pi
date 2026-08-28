@@ -28,19 +28,38 @@ function userMsg(id: string, text: string) {
   return { type: "message", id, parentId: null, timestamp: "", message: { role: "user", content: text, timestamp: Date.now() } };
 }
 
-function fakeCtx(entries: any[], stateFile: string, cwd: string, onNotify?: (s: string) => void) {
+function fakeCtx(entries: any[], stateFile: string, cwd: string, onNotify?: (s: string) => void, model?: any) {
   return {
     mode: "rpc",
     hasUI: false,
     cwd,
     ui: { notify: (s: string) => onNotify?.(s) ?? undefined, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
-    model: { contextWindow: 200_000, id: "test-model" },
+    model: model ?? { contextWindow: 200_000, id: "test-model" },
     getContextUsage: () => null,
     sessionManager: {
       buildContextEntries: () => entries,
       getSessionId: () => "test-session",
       getSessionFile: () => stateFile,
     },
+  };
+}
+
+// A full pi-ai Model pointing at a local mock SSE server, used as the
+// "session" compression model (ctx.model) so the shared-prefix call is a real
+// request we can inspect and stub.
+function sessionModel(baseUrl: string): any {
+  return {
+    id: "session-model",
+    name: "Session Model",
+    provider: "testprov",
+    api: "openai-completions",
+    baseUrl,
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 4000,
+    maxTokens: 2000,
+    headers: { Authorization: "Bearer sk-test" },
   };
 }
 
@@ -241,4 +260,114 @@ test("compress: falls back to main model when the compression model is unreachab
 
   const summaries = await readBlockSummaries(stateFile);
   assert.ok(summaries.some((s) => s === FALLBACK_SUMMARY), `expected main-model fallback summary, got: ${JSON.stringify(summaries)}`);
+});
+
+// ─── /acp compact session (shared-prefix path) ──────────────────────────────
+
+// >= 50 chars (kernel minSummaryLength), no trailing space (summarize trims).
+const SESSION_SUMMARY = "SESSION-SUMMARY: shared-prefix compression model output for this range.";
+
+test("/acp compact session sets compressionModelId to 'session'", async () => {
+  await fs.rm(acpJsonPath, { force: true });
+  const { api } = captureApi();
+  createAcpExtension()(api as any);
+  const stateFile = path.join(tmp, "sess-set-state.json");
+  await fs.rm(`${stateFile}.acp.json`, { force: true });
+  let out = "";
+  const ctx = fakeCtx([userMsg("e1", "hello")], stateFile, tmp, (s) => (out = s));
+  await api.commands.get("acp").handler("compact session", ctx);
+  assert.ok(out.includes("set to session"), `expected session confirmation, got: ${out}`);
+  const written = JSON.parse(await fs.readFile(acpJsonPath, "utf8"));
+  assert.equal(written.compressionModelId, "session");
+});
+
+test("/acp compact (no args) shows current 'session' model", async () => {
+  await fs.writeFile(acpJsonPath, JSON.stringify({ compressionModelId: "session" }));
+  const { api } = captureApi();
+  createAcpExtension()(api as any);
+  const stateFile = path.join(tmp, "sess-status-state.json");
+  await fs.rm(`${stateFile}.acp.json`, { force: true });
+  let out = "";
+  const ctx = fakeCtx([userMsg("e1", "hello")], stateFile, tmp, (s) => (out = s));
+  await api.commands.get("acp").handler("compact", ctx);
+  assert.ok(out.includes("session"), `expected session status, got: ${out}`);
+});
+
+test("compress: session model writes the summary reusing the shared prefix", async () => {
+  let receivedBody = "";
+  const server = http.createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c));
+    req.on("end", () => {
+      receivedBody = body;
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const chunk = (o: unknown) => res.write("data: " + JSON.stringify(o) + "\n\n");
+      chunk({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { role: "assistant", content: SESSION_SUMMARY }, finish_reason: null }] });
+      chunk({ id: "c1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 } });
+      res.write("data: [DONE]\n\n");
+      res.end();
+    });
+  });
+  await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+  const port = (server.address() as { port: number }).port;
+  try {
+    const baseUrl = `http://127.0.0.1:${port}/v1`;
+    // Both the session model (ctx.model) and the registry point at the mock.
+    await writeModelsJson(baseUrl);
+    await fs.rm(acpJsonPath, { force: true });
+    const { api, handlers } = captureApi();
+    createAcpExtension()(api as any);
+    const stateFile = path.join(tmp, "sess-success-state.json");
+    await fs.rm(`${stateFile}.acp.json`, { force: true });
+    const entries = compressibleEntries();
+    const ctx = fakeCtx(entries, stateFile, tmp, undefined, sessionModel(baseUrl));
+    // Capture the transformed messages (the shared prefix) via a context round.
+    await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+
+    await api.commands.get("acp").handler("compact session", ctx);
+
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    const out = await compressTool.execute(
+      "tc1",
+      { content: [{ startId: "m00001", endId: "m00001", summary: "placeholder-from-main-model" }] },
+      undefined, undefined, ctx,
+    );
+    const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+    assert.ok(text.includes("summaries written by session model"), `expected session note, got: ${text}`);
+
+    const summaries = await readBlockSummaries(stateFile);
+    assert.ok(summaries.some((s) => s === SESSION_SUMMARY), `expected session-model summary, got: ${JSON.stringify(summaries)}`);
+    // The shared prefix (captured transformed messages) must be in the request.
+    assert.ok(receivedBody.includes("lorem ipsum"), `expected shared prefix in request body, got: ${receivedBody.slice(0, 200)}`);
+  } finally {
+    server.close();
+  }
+});
+
+test("compress: session model falls back to main model on error", async () => {
+  // Unreachable session model (port 1) → complete() fails → main-model fallback.
+  await writeModelsJson("http://127.0.0.1:1/v1");
+  await fs.rm(acpJsonPath, { force: true });
+  const { api, handlers } = captureApi();
+  createAcpExtension()(api as any);
+  const stateFile = path.join(tmp, "sess-fallback-state.json");
+  await fs.rm(`${stateFile}.acp.json`, { force: true });
+  const entries = compressibleEntries();
+  const ctx = fakeCtx(entries, stateFile, tmp, undefined, sessionModel("http://127.0.0.1:1/v1"));
+  await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
+
+  await api.commands.get("acp").handler("compact session", ctx);
+
+  const FALLBACK = "session-model fallback summary used because the session compression call failed. ";
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  const out = await compressTool.execute(
+    "tc1",
+    { content: [{ startId: "m00001", endId: "m00001", summary: FALLBACK }] },
+    undefined, undefined, ctx,
+  );
+  const text = typeof out === "string" ? out : out.content?.[0]?.text ?? String(out);
+  assert.ok(text.includes("▣ ACP |"), `expected a success panel, got: ${text}`);
+
+  const summaries = await readBlockSummaries(stateFile);
+  assert.ok(summaries.some((s) => s === FALLBACK), `expected main-model fallback summary, got: ${JSON.stringify(summaries)}`);
 });

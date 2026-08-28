@@ -105,6 +105,13 @@ export interface AcpRuntime {
   /** Persist the compression model ref to ~/.pi/acp.json and update the
    *  in-memory adapter so it takes effect immediately. null clears it. */
   setCompressionModelRef(value: string | null): Promise<void>;
+  /** Store the exact transformed AgentMessage[] Pi sent in the last context
+   *  round. The dedicated compression model reuses this as a prompt prefix so
+   *  its call hits the provider's prompt cache (same system prompt + tools +
+   *  messages the main model just saw). */
+  setLastSentMessages(sid: string, messages: AgentMessage[]): void;
+  /** The transformed messages from the last context round, or null. */
+  getLastSentMessages(sid: string): AgentMessage[] | null;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -255,6 +262,7 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   const store = new SessionStateStore();
   const compressionModel = new CompressionModelClient();
   const lastActiveBlockIds = new Map<string, Set<string>>();
+  const lastSentMessages = new Map<string, AgentMessage[]>();
   const locks = new Map<string, Promise<void>>();
   const factoryAdapter = adapter;
   let adapterRef = adapter;
@@ -425,6 +433,14 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
   function clearSessionTracking(sid: string): void {
     lastActiveBlockIds.delete(sid);
+    lastSentMessages.delete(sid);
   }
 
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop, compressionModel, getCompressionModelRef, setCompressionModelRef };}
+  function setLastSentMessages(sid: string, messages: AgentMessage[]): void {
+    lastSentMessages.set(sid, messages);
+  }
+  function getLastSentMessages(sid: string): AgentMessage[] | null {
+    return lastSentMessages.get(sid) ?? null;
+  }
+
+  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop, compressionModel, getCompressionModelRef, setCompressionModelRef, setLastSentMessages, getLastSentMessages };}
