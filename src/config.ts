@@ -58,6 +58,12 @@ export interface CompressConfig extends CompressSettings {
  * (live model context window, protected tools, state persistence).
  */
 export interface AdapterConfig {
+  /** Master switch. Default: true. Set `enabled: false` in acp.json (or
+   *  programmatically) to turn the whole adapter off — no tools, no system
+   *  prompt, no context transform — for models too small to handle ACP, where
+   *  Pi's native context management should run instead. Checked at extension
+   *  load; requires a Pi restart to take effect. */
+  enabled?: boolean;
   /** When omitted, the adapter reads `ctx.model.contextWindow` live each turn.
    *  Set explicitly for tests/headless runs. */
   modelContextLimit?: number;

@@ -4,6 +4,10 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
@@ -46,6 +50,10 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
       return;
     }
+    if (adapter.enabled === false || userConfigDisabled(process.cwd())) {
+      console.log("[bcp] disabled: enabled=false — ACP tools and system prompt off; Pi's native context management is in control");
+      return;
+    }
     const runtime = createRuntime(adapter);
     wireCompactionDisable(pi, runtime);
     wireSessionLifecycle(pi, runtime);
@@ -65,6 +73,29 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 }
 
 export default createAcpExtension();
+
+// Sync factory-time read of the `enabled` master switch: the factory runs at
+// extension load, before session_start (where the async loadUserConfig runs),
+// so a disabled adapter must be detected here to register nothing at all —
+// no tools, no system prompt, no context transform, and no compaction-cancel,
+// leaving Pi's native context management in control (issue #250: models too
+// small to handle ACP). Project acp.json overrides global; only a literal
+// enabled:true/false counts; missing/bad files mean "not disabled".
+function userConfigDisabled(cwd: string): boolean {
+  let disabled: boolean | undefined;
+  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
+      if (parsed && typeof parsed === "object") {
+        const v = (parsed as Record<string, unknown>).enabled;
+        if (v === true || v === false) disabled = v;
+      }
+    } catch {
+      // missing file / bad JSON → not disabled
+    }
+  }
+  return disabled === false;
+}
 
 // ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
 // opencode-acp requiring opencode's compaction.auto = false). On a refused host
@@ -143,7 +174,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // rpc/json/print have hasUI=false and the call is a no-op.
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
