@@ -1,5 +1,6 @@
-import type { ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
@@ -25,20 +26,31 @@ function cacheUsageSamples(entries: SessionEntry[]): Array<{ input: number; cach
   return out;
 }
 
-export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
+export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ name: string; options: CommandOptions }> {
+  // Persistent transcript output (rendered by TUI and web hosts like pi-web);
+  // notify() is a transient toast and only the fallback for hosts without
+  // sendMessage (issue #255).
+  const statusHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+    const text = await statusReport(runtime, ctx);
+    if (typeof pi?.sendMessage === "function") {
+      pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+      return;
+    }
+    ctx.ui.notify(text);
+  };
   return [
     {
       name: "acp",
       options: {
         description: "Show ACP context usage, token breakdown, and compression status.",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: statusHandler,
       },
     },
     {
       name: "acp-status",
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: statusHandler,
       },
     },
     {
