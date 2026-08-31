@@ -64,3 +64,19 @@ export function lastUserMessageId(entries: { id: string; message?: { role?: stri
   }
   return undefined;
 }
+
+// Per-request prompt size the provider reported for the last assistant reply
+// (input + cacheRead + cacheWrite). Unlike pi's getContextUsage, this never
+// falls back to the session-tree sum, so it shrinks after compression. 0 when
+// no assistant reply carries usage. issue #257: floors the meter onto the real scale.
+export function lastProviderPromptTokens(entries: { type?: string; message?: AgentMessage }[]): number {
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i]!;
+    if (e.type !== "message") continue;
+    const m = e.message as { role?: string; usage?: { input?: number; cacheRead?: number; cacheWrite?: number } };
+    if (m?.role !== "assistant" || !m.usage) continue;
+    const total = (m.usage.input ?? 0) + (m.usage.cacheRead ?? 0) + (m.usage.cacheWrite ?? 0);
+    if (total > 0) return total;
+  }
+  return 0;
+}

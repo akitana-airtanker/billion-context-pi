@@ -8,7 +8,7 @@
  *
  * 设计要点（文档 §3.2/§5 定稿）：
  * - 累积锚点法而非 EMA：Δreal/Δest 同窗口，天然对齐无滞后（评审 D1/D2）
- * - clamp [0.5, 2.5]：没有自然语言密度能超过 2.5 token/char（评审 D3）
+ * - clamp [0.5, 6]：CJK 真实密度可达 ~5×，上限须覆盖之（issue #257；原 2.5 评审 D3 已放宽）
  * - 最小 Δest=50 门槛：微消息比值抖动（评审 D4）
  * - ±20% 连续 2 轮确认才采纳：防单轮异常污染锚点（评审 C1）
  * - 压缩后跳过一轮（postCompressionSkip）：Δest 为负 + provider usage 滞后（评审 D7/F1）
@@ -17,7 +17,9 @@
 import { defaultCountTokens } from "acp-kernel";
 
 export const DENSITY_MIN = 0.5;
-export const DENSITY_MAX = 2.5;
+// CJK (Qwen ≈1 char/token vs the chars/4 base) runs ~5x real density; a 2.5 cap
+// left the meter at ≤50% of real, making the 0.75/0.95 bands unreachable (#257).
+export const DENSITY_MAX = 6;
 export const MIN_DELTA_EST = 50;
 export const CONFIRM_RATIO = 0.2; // ±20% 确认带
 export const INITIAL_DENSITY = 1;

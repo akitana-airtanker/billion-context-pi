@@ -19,7 +19,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages, lastProviderPromptTokens } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -199,6 +199,16 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // below is fed the RAW sentTokens — its samples must stay on the
       // raw basis or density would chase its own calibration.
       let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // issue #257: learned density is clamped at DENSITY_MAX, which for CJK
+      // (~5x real) still under-reports, so the 0.75/0.95 bands never trip. The
+      // provider's real per-request prompt size is already on hand — floor the
+      // meter at it so the bands run on the real scale. Only ever raises (never
+      // lowers): a stale/small number can't cause a false emergency. tokenCount
+      // only feeds processTurn; density.update below stays on the raw sentTokens.
+      const realPromptTokens = lastProviderPromptTokens(entries);
+      if (realPromptTokens > tokenCount) {
+        tokenCount = realPromptTokens;
+      }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
       // even if the density-calibrated estimate under-reports the sent view.

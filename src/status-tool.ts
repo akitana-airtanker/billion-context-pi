@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages, lastProviderPromptTokens } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -60,11 +60,15 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
+  // issue #257: run the nudge decision on the real scale — floor the calibrated
+  // meter at the provider's real per-request prompt size (same as src/index.ts).
+  const calibrated = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+  const providerReal = lastProviderPromptTokens(entries);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
+    tokenCount: Math.max(calibrated, providerReal),
   });
   const processed = turn.messages;
 
@@ -86,6 +90,19 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const protectedRanges = nudge?.protectedRanges ?? [];
 
   const extra: string[] = [];
+  // issue #257: side-by-side estimate vs provider-real so miscalibration is
+  // visible at a glance (Estimate is the pre-floor calibrated meter — the gap
+  // shows whether density learning has caught up to the real scale).
+  if (providerReal > 0 && config.modelContextLimit > 0) {
+    const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+    const estPct = Math.round((calibrated / config.modelContextLimit) * 100);
+    const realPct = Math.round((providerReal / config.modelContextLimit) * 100);
+    const gap = calibrated > 0 ? providerReal / calibrated : 0;
+    extra.push("");
+    extra.push(
+      `Estimate: ${fmtK(calibrated)} (${estPct}%)   |   Provider-reported: ${fmtK(providerReal)} (${realPct}%)   →  density ${gap.toFixed(1)}x, ${gap <= 1.25 ? "calibrated" : "miscalibrated"}`,
+    );
+  }
   if (nudge) {
     extra.push("");
     extra.push(

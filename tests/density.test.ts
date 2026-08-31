@@ -36,12 +36,12 @@ test("converges to true density after 2 consistent rounds (anchor method)", () =
   assert.equal(d.densityFor(MODEL), 1.6);
 });
 
-test("clamps instant density to [0.5, 2.5]", () => {
+test("clamps instant density to [0.5, 6]", () => {
   const d = est();
   d.update(MODEL, 100_000, 50_000); // anchor
-  // instant = 5000/1000 = 5 → clamp 2.5
-  d.update(MODEL, 105_000, 51_000);
-  d.update(MODEL, 110_000, 52_000); // confirm 2.5
+  // instant = 7000/1000 = 7 → clamp 6 (CJK real density exceeds the old 2.5 cap, #257)
+  d.update(MODEL, 107_000, 51_000);
+  d.update(MODEL, 114_000, 52_000); // confirm 6
   assert.equal(d.densityFor(MODEL), DENSITY_MAX);
 
   const d2 = est();

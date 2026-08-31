@@ -3,7 +3,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages, lastProviderPromptTokens } from "./tokens.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
@@ -146,7 +146,9 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const coveredIds = collectCoveredMessageIds(state);
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
+  // issue #257: floor the meter at the provider's real per-request prompt size
+  // so the panel's nudge matches the real decision (same as src/index.ts).
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: Math.max(calibrateTokens(sentTokens, runtime.density.densityFor(modelId)), lastProviderPromptTokens(entries ?? [])) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:
