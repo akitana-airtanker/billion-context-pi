@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity } from "../src/messages.js";
+import { entriesToCoreMessages, coreOutToAgentMessages, matchesStoredText, messageIdentity, ACP_STATUS_CUSTOM_TYPE } from "../src/messages.js";
 import type { CoreMessage } from "acp-kernel";
 import type { SessionEntry, SessionMessageEntry } from "@earendil-works/pi-coding-agent";
 
@@ -194,6 +194,18 @@ test("entriesToCoreMessages drops custom_message with non-text-only array conten
   const core = entriesToCoreMessages(entries);
 
   assert.equal(core.length, 0, "non-text array content yields empty text → skipped");
+});
+
+test("entriesToCoreMessages drops acp-status panels (UI-only, never sent to model)", () => {
+  const entries: SessionEntry[] = [
+    msgEntry("a", user("before")),
+    customEntry("b", ACP_STATUS_CUSTOM_TYPE, "╭── ACP ──╮\npanel body"),
+    customEntry("c", "subagent_result", "other custom messages still project"),
+    msgEntry("d", user("after")),
+  ];
+  const core = entriesToCoreMessages(entries);
+
+  assert.deepEqual(core.map((m) => m.id), ["a", "c", "d"], "acp-status panel excluded, other custom messages kept");
 });
 
 test("custom_message round-trip: entriesToCoreMessages → collectOriginals → coreOutToAgentMessages preserves user role", () => {

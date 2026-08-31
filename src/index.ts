@@ -56,7 +56,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
-    for (const { name, options } of makeCommands(runtime)) {
+    for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
   };
