@@ -20,6 +20,7 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -182,13 +183,26 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // Usage/emergency arbitration on the sent view, floored at the host's
       // real context usage (issue #257): the CJK-aware base estimate is still
       // a heuristic (images, mixed content, per-model tokenizer drift), so
-      // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
-      // anchored on the last assistant's provider-reported usage + trailing
-      // estimate. Only ever raises (never lowers): a stale/small number can't
-      // cause a false emergency. tokenCount only feeds processTurn.
+      // the 0.75/0.95 bands run on the real scale via the floor. The floor
+      // only ever raises (never lowers) tokenCount. One guard + one accepted
+      // gap:
+      //  - Stale anchor: a successful compress lands AFTER the last assistant
+      //    usage anchor pi floors from, so the next LLM call would floor at
+      //    the pre-compress request size and re-run the emergency decision
+      //    (nudge + tool-result truncation) on context that was just shrunk.
+      //    Skip the floor until a fresh assistant usage arrives - mirrors
+      //    pi's own "usage source must be post-compaction" check.
+      //  - Accepted gap (omp #18): when the provider never reports usage, pi
+      //    falls back to the session-tree sum, which never shrinks after ACP
+      //    compression (the extension only prunes the sent view) - the floor
+      //    then pins the meter high for such providers.
+      // tokenCount only feeds processTurn (nudge/truncate).
       let tokenCount = sentTokens;
       const realPromptTokens = realUsage?.tokens ?? 0;
-      if (realPromptTokens > tokenCount) {
+      const anchorStale = usageAnchorPredatesCompression(entries);
+      if (anchorStale && realPromptTokens > sentTokens) {
+        logInfo("floor", { sid, event: "stale-anchor-skip", sentTokens, realPromptTokens });
+      } else if (realPromptTokens > tokenCount) {
         tokenCount = realPromptTokens;
       }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
