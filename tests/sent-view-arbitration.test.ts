@@ -3,10 +3,10 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
-// Nudge arbitration runs on the calibrated SENT-VIEW estimate floored at the
-// host's real context usage (issue #257): the floor keeps the 0.75/0.95 bands
-// on the real scale when density learning under-reports (CJK), and the sent
-// view still drives the decision when the host reports nothing useful.
+// Nudge arbitration runs on the SENT-VIEW estimate floored at the host's real
+// context usage (issue #257): the floor keeps the 0.75/0.95 bands on the real
+// scale when the CJK-aware estimate under-reports, and the sent view still
+// drives the decision when the host reports nothing useful.
 
 const STATE_FILE = "/tmp/pai-acp-sent-view-it.session.json";
 

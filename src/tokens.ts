@@ -13,7 +13,7 @@ export function collectCoveredMessageIds(state: { blocks: { active: boolean; eff
   return ids;
 }
 
-// ~Anthropic screenshot cost; real per-model cost (85..2.8K) converges via density calibration.
+// ~Anthropic screenshot cost; real per-model cost (85..2.8K) varies — flat approximation.
 export const IMAGE_TOKEN_COST = 1600;
 
 // pi-ai silently drops image blocks for non-vision models, so they cost nothing there.
@@ -44,15 +44,6 @@ export function estimateTokens(messages: CoreMessage[], coveredIds?: Set<string>
     if (img) tokens += img;
   }
   return tokens;
-}
-
-/** Scale a raw (uncalibrated) sent-view estimate by the per-model density
- *  learned from provider usage (density = real/estimate). Used for nudge /
- *  usage / emergency arbitration at every processTurn site so the decision
- *  runs on the provider-anchored scale; the estimator itself is always fed
- *  the RAW estimate — see density.ts. */
-export function calibrateTokens(estimate: number, density: number): number {
-  return density === 1 ? estimate : Math.round(estimate * density);
 }
 
 /** Id of the last user-role entry — used as a per-turn key so a nudge prints at

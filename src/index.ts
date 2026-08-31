@@ -19,7 +19,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -80,17 +80,13 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking();
-    // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
-    const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-    runtime.density.resetModel(modelId);
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
-    runtime.clearSessionTracking(sid);
     // Model identity on every session start: diagnosing "which model loops
     // on compress rejections" from user logs required cwd forensics — the log
     // never said which model it was. id + contextWindow also catch window
-    // misconfigurations. (modelId above already feeds density calibration.)
+    // misconfigurations.
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
@@ -138,9 +134,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const release = await runtime.acquireLock(sid);
     try {
       await runtime.reloadConfig(ctx.cwd);
-      // 每轮绑定 countTokens 使用的模型（密度校准按 model 隔离）
       const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-      runtime.setCountModel(modelId);
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const configBase = runtime.configFor(ctx);
       const ov = runtime.overflowFor(sid);
@@ -176,41 +170,31 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         }
       }
       const coveredIds = collectCoveredMessageIds(state);
-      // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
-      // pruned projection + measured system prompt, calibrated by learned
-      // density and floored at the host's real context usage (issue #257,
-      // below). realUsage is anchored on the last assistant's provider-
-      // reported usage when available; it is also logged for diagnostics.
+      // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
+      // pruned projection + measured system prompt, floored at the host's real
+      // context usage (issue #257, below). realUsage is anchored on the last
+      // assistant's provider-reported usage when available; it is also logged
+      // for diagnostics.
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
       const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
-      // Usage/emergency arbitration on the CALIBRATED sent view: density is
-      // the provider-anchored real/estimate ratio learned by the estimator
-      // (docs/token-calibration-plan.md §3.2). Raw CJK-aware estimates
-      // under-report CJK context by ~20-40%, which would delay the forced
-      // nudge and emergency truncate past the real window. The estimator
-      // below is fed the RAW sentTokens — its samples must stay on the
-      // raw basis or density would chase its own calibration.
-      let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
-      // issue #257: learned density is clamped at DENSITY_MAX, which for CJK
-      // (~5x real) still under-reports, so the 0.75/0.95 bands never trip.
-      // Floor the meter at the host's real context usage (anchored on the
-      // last assistant's provider-reported usage + trailing estimate) so the
-      // bands run on the real scale. This is the same value density.update
-      // below is fed — floor and calibration target are one quantity. Only
-      // ever raises (never lowers): a stale/small number can't cause a false
-      // emergency. tokenCount only feeds processTurn; density.update stays on
-      // the raw sentTokens.
+      // Usage/emergency arbitration on the sent view, floored at the host's
+      // real context usage (issue #257): the CJK-aware base estimate is still
+      // a heuristic (images, mixed content, per-model tokenizer drift), so
+      // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
+      // anchored on the last assistant's provider-reported usage + trailing
+      // estimate. Only ever raises (never lowers): a stale/small number can't
+      // cause a false emergency. tokenCount only feeds processTurn.
+      let tokenCount = sentTokens;
       const realPromptTokens = realUsage?.tokens ?? 0;
       if (realPromptTokens > tokenCount) {
         tokenCount = realPromptTokens;
       }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
-      // even if the density-calibrated estimate under-reports the sent view.
-      // tokenCount only feeds processTurn (nudge/truncate); density.update below
-      // uses the raw sentTokens, so the boost cannot corrupt calibration.
+      // even if the estimate under-reports the sent view. tokenCount only feeds
+      // processTurn (nudge/truncate).
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
         const floor = Math.floor(config.modelContextLimit * 0.95);
@@ -219,19 +203,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
           logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
         }
       }
-      // A compress happened since the previous context round: blocks are
-      // created out-of-band by the compress tool, so detect new active
-      // blocks on the LOADED state vs. the previous round (comparing a
-      // single processTurn's input/output can never see them).
-      const postCompression = runtime.noteActiveBlocks(
-        sid,
-        state.blocks.filter((b) => b.active).map((b) => b.blockId),
-      );
-
       debug.event("context-in", {
         sid,
         modelId,
-        density: runtime.density.densityFor(modelId),
         eventMsgs: event.messages?.length ?? 0,
         entries: entries.length,
         coreMsgs: coreMessages.length,
@@ -244,11 +218,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
-      // 密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
-      // real 侧 = provider 锚定 usage（缺失时锚点冻结，§5.9）；est 侧 = 发送视图估算
-      // （estimateTokens 内部走 CJK 感知 defaultCountTokens，与注入 kernel 的计数器同源）。
-      // postCompression = 自上一轮 context 事件以来新增了 active block（模型刚压缩过）。
-      runtime.density.update(modelId, realUsage?.tokens ?? null, sentTokens, postCompression);
 
       logInfo("turn", {
         sid,
@@ -265,7 +234,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       });
       debug.event("processTurn", {
         modelId,
-        density: runtime.density.densityFor(modelId),
         outMsgs: turn.messages.length,
         summaryMsgs: turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
