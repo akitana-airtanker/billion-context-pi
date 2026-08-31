@@ -4,7 +4,6 @@ import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
-import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
@@ -131,10 +130,6 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();
-  // Stale anchor (usage predates the last successful compress, src/floor-stale.ts):
-  // skip the floor everywhere below so the panel doesn't re-run the
-  // pre-compress emergency decision right after a successful compress.
-  const anchorStale = usageAnchorPredatesCompression(entries ?? []);
 
   // Nudge arbitration on the SENT-VIEW scale — must match the context
   // transform and acp_status: sent-view estimate floored at the host's real
@@ -143,12 +138,12 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
-  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
+  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
   // issue #257: floor the meter at the host's real context usage so the
   // panel's nudge matches the real decision (same as src/index.ts).
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, realUsage?.tokens ?? 0) });
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: Math.max(sentTokens, realUsage?.tokens ?? 0) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

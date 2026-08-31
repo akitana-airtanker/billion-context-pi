@@ -1,14 +1,7 @@
 # Token Calibration — 让 pending 计算对齐 provider 真实 token
 
-> **⚠️ 状态更新（2026-08，PR #258 后）：本文描述的 density 校准系统已整体移除，本文仅作历史设计记录保留。**
-> 现行方案（issue #257）：发送视图 CJK-aware 估算 + host 真实 usage 下限（floor，只抬不压）：
-> - `tokenCount = max(sentTokens, ctx.getContextUsage().tokens)`，仅用于 processTurn 的 nudge/truncate 仲裁（context transform / `acp_status` / `/acp` 三处一致）；
-> - **stale-anchor 守卫**：成功 compress 落在锚点（最后一条带 usage 的 assistant）之后时，下一个 LLM 调用跳过 floor（`src/floor-stale.ts`），避免在刚压缩完的上下文上重跑 emergency（对齐 pi 自身 compaction 的 “usage source must be post-compaction” 检查）；
-> - 已知取舍 1（omp #18，接受）：provider 永不报 usage 时 pi 回退到 session 树求和，树总量在 ACP 压缩后只增不减 → floor 会让此类 provider 永久高位；
-> - 已知取舍 2（接受）：显示层（compress 面板 `X → Y (~Z reclaimed)`、kernel `countTokens`、面板条）回到未校准估算，CJK 低估 2–5×；决策层由 floor 兜底，`/status` 诊断行 `Estimate | Provider-reported` 对 CJK 会话长期分叉，以 Provider-reported 为准。
-
 > 分支：`feat/token-calibration`（worktree: `/Users/yintianan/GitHub/billion-context-pi-wt2`）
-> 状态（历史）：**已实现 + 真实会话验证**（Phase 1/2 + §11 快照化，详见 §10/§11）→ **已于 #258 移除**
+> 状态：**已实现 + 真实会话验证**（Phase 1/2 + §11 快照化，详见 §10/§11）
 > 实测环境：**DeepSeek V4-Flash**（1M 窗口）。其 tokenizer 中英文密度差异大
 > （官方：1 英文字符 ≈ 0.3 token、1 中文字符 ≈ 0.6 token，中文密度为英文 2 倍；
 > 实测 1 汉字 ≈ 1.2-1.3 token），chars/4 估算对中文内容严重低估 —— 本方案的
