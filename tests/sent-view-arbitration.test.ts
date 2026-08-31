@@ -111,3 +111,24 @@ test("context transform stays idle when there is no provider usage to floor from
   assert.equal(nudgeCount(r), 0, "no nudge: 42% estimate and no provider usage to floor from");
   await rm(`${STATE_FILE}.500.acp.json`, { force: true });
 });
+
+// Stale-anchor guard (PR #258 review): the usage anchor (e19's 175K usage)
+// predates the successful compress toolResult that follows it. The next LLM
+// call must NOT floor the meter at the pre-compress anchor — the context was
+// just shrunk, so no emergency fires even though the host still reports 97%
+// of the window (same stream and fakeCtx(175_000) as the floor test above).
+test("context transform skips the provider-usage floor while the anchor predates a successful compress", async () => {
+  await rm(`${STATE_FILE}.175001.acp.json`, { force: true });
+  const { api, handlers } = captureApi();
+  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+
+  const ctx = fakeCtx(175_000);
+  const entries = [msg("e0", "user", "start " + MID)];
+  for (let i = 1; i <= 18; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
+  entries.push({ type: "message", id: "e19", parentId: null, timestamp: "", message: { role: "assistant", content: "f19 " + MID, timestamp: Date.now(), usage: { input: 175_000, cacheRead: 0, cacheWrite: 0 } } });
+  entries.push({ type: "message", id: "e20", parentId: null, timestamp: "", message: { role: "toolResult", toolName: "compress", toolCallId: "c1", content: [{ type: "text", text: "▣ ACP | 42.3K → 18.9K tokens (~23.4K reclaimed, 3 blocks)" }], timestamp: Date.now() } });
+  branchEntries = entries;
+  const r = await fire(handlers, entries, ctx);
+  assert.equal(nudgeCount(r), 0, "no nudge: usage anchor predates a successful compress, floor skipped");
+  await rm(`${STATE_FILE}.175001.acp.json`, { force: true });
+});
