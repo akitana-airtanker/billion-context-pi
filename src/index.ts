@@ -20,6 +20,7 @@ import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
 import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -184,11 +185,12 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // a heuristic (images, mixed content, per-model tokenizer drift), so
       // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
       // anchored on the last assistant's provider-reported usage + trailing
-      // estimate. Only ever raises (never lowers): a stale/small number can't
-      // cause a false emergency. tokenCount only feeds processTurn.
+      // estimate. Only ever raises (never lowers); skipped while the anchor
+      // predates a successful compress (floor-stale.ts). tokenCount only
+      // feeds processTurn.
       let tokenCount = sentTokens;
       const realPromptTokens = realUsage?.tokens ?? 0;
-      if (realPromptTokens > tokenCount) {
+      if (!usageAnchorPredatesCompression(entries) && realPromptTokens > tokenCount) {
         tokenCount = realPromptTokens;
       }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%

@@ -3,6 +3,7 @@ import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendi
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -61,11 +62,12 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // issue #257: run the nudge decision on the real scale — floor the sent-view
   // estimate at the host's real context usage (same as src/index.ts).
   const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
+  const anchorStale = usageAnchorPredatesCompression(entries);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: Math.max(sentTokens, providerReal),
+    tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, providerReal),
   });
   const processed = turn.messages;
 
