@@ -2,7 +2,7 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages, lastProviderPromptTokens } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
@@ -53,17 +53,16 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // pruned messages showed up in acp_status even though they never reached
   // the model.
   const coveredIds = collectCoveredMessageIds(state);
-  // Sent-view arbitration (same scale as the context transform): never the
-  // session-tree number from getContextUsage, which includes compressed
-  // originals and never shrinks (false emergencies; see src/index.ts).
+  // Sent-view arbitration (same scale as the context transform), floored at
+  // the host's real context usage (issue #257; see src/index.ts).
   const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
   // issue #257: run the nudge decision on the real scale — floor the calibrated
-  // meter at the provider's real per-request prompt size (same as src/index.ts).
+  // meter at the host's real context usage (same as src/index.ts).
   const calibrated = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
-  const providerReal = lastProviderPromptTokens(entries);
+  const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,

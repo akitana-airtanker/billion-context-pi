@@ -19,7 +19,7 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages, lastProviderPromptTokens } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -177,16 +177,10 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
-      // pruned projection + measured system prompt. pi's real usage is
-      // anchored on the last assistant's provider-reported usage when
-      // available — close to the sent view — but it falls back to summing
-      // the whole session tree (originals included, never shrinks) when the
-      // provider reports no usage. After compression (or after switching to
-      // a smaller-window model) that tree number can exceed the window many
-      // times over while the real sent view is a few percent — permanent
-      // false EMERGENCY nudges while the session keeps working (omp issue
-      // #18 report; same host lineage). The tree-scale number is logged for
-      // diagnostics only.
+      // pruned projection + measured system prompt, calibrated by learned
+      // density and floored at the host's real context usage (issue #257,
+      // below). realUsage is anchored on the last assistant's provider-
+      // reported usage when available; it is also logged for diagnostics.
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
@@ -200,12 +194,15 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // raw basis or density would chase its own calibration.
       let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
       // issue #257: learned density is clamped at DENSITY_MAX, which for CJK
-      // (~5x real) still under-reports, so the 0.75/0.95 bands never trip. The
-      // provider's real per-request prompt size is already on hand — floor the
-      // meter at it so the bands run on the real scale. Only ever raises (never
-      // lowers): a stale/small number can't cause a false emergency. tokenCount
-      // only feeds processTurn; density.update below stays on the raw sentTokens.
-      const realPromptTokens = lastProviderPromptTokens(entries);
+      // (~5x real) still under-reports, so the 0.75/0.95 bands never trip.
+      // Floor the meter at the host's real context usage (anchored on the
+      // last assistant's provider-reported usage + trailing estimate) so the
+      // bands run on the real scale. This is the same value density.update
+      // below is fed — floor and calibration target are one quantity. Only
+      // ever raises (never lowers): a stale/small number can't cause a false
+      // emergency. tokenCount only feeds processTurn; density.update stays on
+      // the raw sentTokens.
+      const realPromptTokens = realUsage?.tokens ?? 0;
       if (realPromptTokens > tokenCount) {
         tokenCount = realPromptTokens;
       }

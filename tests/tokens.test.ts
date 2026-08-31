@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { estimateTokens, lastUserMessageId, lastProviderPromptTokens } from "../src/tokens.js";
+import { estimateTokens, lastUserMessageId } from "../src/tokens.js";
 
 test("estimateTokens matches kernel defaultCountTokens (CJK 1:1 + chars/4)", () => {
   const msgs = [
@@ -66,40 +66,4 @@ test("lastUserMessageId handles entries without message field", () => {
     { id: "b", message: { role: "user" } },
   ];
   assert.equal(lastUserMessageId(entries), "b", "skips entries without message");
-});
-
-test("lastProviderPromptTokens sums input+cacheRead+cacheWrite of the last assistant usage", () => {
-  const entries = [
-    { type: "message", message: { role: "user" } },
-    { type: "message", message: { role: "assistant", usage: { input: 100_000, cacheRead: 50_000, cacheWrite: 10_000 } } },
-    { type: "message", message: { role: "toolResult" } },
-  ];
-  assert.equal(lastProviderPromptTokens(entries), 160_000);
-});
-
-test("lastProviderPromptTokens returns the LAST assistant usage, not the first", () => {
-  const entries = [
-    { type: "message", message: { role: "assistant", usage: { input: 1_000, cacheRead: 0, cacheWrite: 0 } } },
-    { type: "message", message: { role: "assistant", usage: { input: 200_000, cacheRead: 0, cacheWrite: 0 } } },
-  ];
-  assert.equal(lastProviderPromptTokens(entries), 200_000);
-});
-
-test("lastProviderPromptTokens skips non-message entries and non-assistant roles", () => {
-  const entries = [
-    { type: "thinking", message: { role: "assistant", usage: { input: 500, cacheRead: 0, cacheWrite: 0 } } },
-    { type: "message", message: { role: "user" } },
-  ];
-  assert.equal(lastProviderPromptTokens(entries), 0);
-});
-
-test("lastProviderPromptTokens treats a zero usage as absent", () => {
-  const entries = [
-    { type: "message", message: { role: "assistant", usage: { input: 0, cacheRead: 0, cacheWrite: 0 } } },
-  ];
-  assert.equal(lastProviderPromptTokens(entries), 0);
-});
-
-test("lastProviderPromptTokens returns 0 for empty entries", () => {
-  assert.equal(lastProviderPromptTokens([]), 0);
 });

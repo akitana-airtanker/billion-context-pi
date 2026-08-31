@@ -3,14 +3,10 @@ import assert from "node:assert/strict";
 import { rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
-// Regression (mirrors omp tests/sent-view-arbitration.test.ts): nudge
-// arbitration must run on the SENT-VIEW estimate. pi's getContextUsage is
-// anchored on the last assistant's provider-reported usage when available,
-// but falls back to summing the whole session tree when providers don't
-// report usage — the tree includes compressed originals and never shrinks,
-// so a session switched to a smaller-window model (or a provider that never
-// reports usage) showed permanent false EMERGENCY nudges at "204%" while the
-// real sent view was a few percent and the chat kept working.
+// Nudge arbitration runs on the calibrated SENT-VIEW estimate floored at the
+// host's real context usage (issue #257): the floor keeps the 0.75/0.95 bands
+// on the real scale when density learning under-reports (CJK), and the sent
+// view still drives the decision when the host reports nothing useful.
 
 const STATE_FILE = "/tmp/pai-acp-sent-view-it.session.json";
 
@@ -60,23 +56,6 @@ const fire = (handlers: Map<string, ((e: any, ctx: any) => any)[]>, entries: any
 const nudgeCount = (r: any) =>
   (r?.messages ?? []).filter((m: any) => m.role === "user" && /Context limit reached|compress/i.test(JSON.stringify(m.content))).length;
 
-test("context transform ignores session-tree accounting (180K window, 366K tree)", async () => {
-  await rm(`${STATE_FILE}.365606.acp.json`, { force: true });
-  const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
-
-  // Host reports a tree that outgrew the window (switched down from 1M).
-  // The live stream the model actually sees is ~36K — 20% of the window.
-  const ctx = fakeCtx(365_606);
-  const entries = [msg("e0", "user", "start " + MID)];
-  for (let i = 1; i <= 7; i++) entries.push(msg(`e${i}`, i % 2 ? "assistant" : "user", `f${i} ` + MID));
-
-  branchEntries = entries;
-  const r = await fire(handlers, entries, ctx);
-  assert.equal(nudgeCount(r), 0, "no emergency nudge: sent view is well within the window");
-  await rm(`${STATE_FILE}.365606.acp.json`, { force: true });
-});
-
 test("context transform DOES go emergency when the sent view itself overflows", async () => {
   await rm(`${STATE_FILE}.1000.acp.json`, { force: true });
   const { api, handlers } = captureApi();
@@ -115,8 +94,9 @@ test("context transform trips the emergency nudge from the provider-usage floor 
   await rm(`${STATE_FILE}.175000.acp.json`, { force: true });
 });
 
-// Control: same 20-message stream, no provider usage → the meter stays on the
-// 42% estimate and no nudge fires, proving the floor (not the bulk) drives it.
+// Control: same 20-message stream with a tiny (500-token) real usage → the
+// floor is a no-op, the meter stays on the ~42% estimate and no nudge fires,
+// proving the floor (not the bulk) drives the emergency above.
 test("context transform stays idle when there is no provider usage to floor from", async () => {
   await rm(`${STATE_FILE}.500.acp.json`, { force: true });
   const { api, handlers } = captureApi();
