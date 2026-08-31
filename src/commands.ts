@@ -3,7 +3,7 @@ import type { AcpRuntime } from "./runtime.js";
 import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
@@ -132,21 +132,18 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   const realUsage = ctx.getContextUsage?.();
 
   // Nudge arbitration on the SENT-VIEW scale — must match the context
-  // transform and acp_status. pi's getContextUsage is anchored on the last
-  // assistant's provider-reported usage when available (≈ real sent view,
-  // fine), but falls back to summing the whole session tree when providers
-  // don't report usage — same class of false emergency as the omp 180K-
-  // window/366K-tree report (session keeps chatting while nudge screams
-  // EMERGENCY at 204%). The tree-scale number stays in the log only.
+  // transform and acp_status: sent-view estimate floored at the host's real
+  // context usage (issue #257).
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
   const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
-  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
+  // issue #257: floor the meter at the host's real context usage so the
+  // panel's nudge matches the real decision (same as src/index.ts).
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: Math.max(sentTokens, realUsage?.tokens ?? 0) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

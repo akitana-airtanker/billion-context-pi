@@ -9,7 +9,6 @@ import {
   type Prompts,
 } from "acp-kernel";
 import { resolveConfig, type AdapterConfig } from "./config.js";
-import { DensityEstimator } from "./density.js";
 import { entriesToCoreMessages, extractText, matchesStoredText, messageIdentity, messageRef } from "./messages.js";
 import { SessionStateStore, type LiveRefOrigin } from "./state.js";
 import { loadUserConfig, applyUserConfig } from "./user-config.js";
@@ -51,17 +50,6 @@ export interface AcpRuntime {
    *  that cycles through many sessions doesn't accumulate them. */
   throttleDrop: (sid: string) => void;
   store: SessionStateStore;
-  density: DensityEstimator;
-  /** 设置 countTokens 闭包使用的 modelId（每轮 context 事件调用）。 */
-  setCountModel(modelId: string): void;
-  /** Record this session's active block ids for the current context round;
-   *  returns true when a new active block appeared since the previous round
-   *  (i.e. a compress happened out-of-band — blocks are created by the
-   *  compress tool between context events, so they can never be detected by
-   *  comparing a single processTurn's input/output state). */
-  noteActiveBlocks(sid: string, activeBlockIds: string[]): boolean;
-  /** Drop per-session tracking state (session_start). */
-  clearSessionTracking(sid: string): void;
   adapter: AdapterConfig;
   setAdapter(adapter: AdapterConfig): void;
   prompts: Prompts;
@@ -238,14 +226,12 @@ function pruneOrphanRefs(state: CompressionState, messages: ReturnType<typeof en
 export const MAX_COMPRESS_ATTEMPTS = 3;
 
 export function createRuntime(adapter: AdapterConfig): AcpRuntime {
-  const density = new DensityEstimator();
-  let countModelId = "default";
   const core = createCore({
-    // 密度校准版 countTokens（Phase 2）：默认回落 defaultCountTokens（density=1）
-    countTokens: (text) => density.estimateWithDensity(countModelId, text),
+    // CJK-aware base counter (kernel default); the meter's real-scale floor
+    // (src/index.ts) covers provider-anchored calibration.
+    countTokens: defaultCountTokens,
   });
   const store = new SessionStateStore();
-  const lastActiveBlockIds = new Map<string, Set<string>>();
   const locks = new Map<string, Promise<void>>();
   const factoryAdapter = adapter;
   let adapterRef = adapter;
@@ -392,15 +378,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  function noteActiveBlocks(sid: string, activeBlockIds: string[]): boolean {
-    const current = new Set(activeBlockIds);
-    const prev = lastActiveBlockIds.get(sid);
-    const isNew = prev !== undefined && activeBlockIds.some((id) => !prev.has(id));
-    lastActiveBlockIds.set(sid, current);
-    return isNew;
-  }
-  function clearSessionTracking(sid: string): void {
-    lastActiveBlockIds.delete(sid);
-  }
-
-  return { core, store, density, setCountModel: (m) => { countModelId = m; }, noteActiveBlocks, clearSessionTracking, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

@@ -6,7 +6,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
 import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 
@@ -160,22 +160,19 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     messages: coreMessages,
     state: initialState,
     config,
-    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
+    tokenCount: sentTokens,
   });
   const state = turn.state;
   const messages = turn.messages;
-  // Display-layer density alignment (doc §3.3): beforeTokens is calibrated to
-  // the same scale as the kernel's injected countTokens (which already carries
-  // density), so the numbers the model sees match real usage.
-  const density = runtime.density.densityFor(modelId);
-  const beforeTokens = calibrateTokens(estimateTokens(messages, collectCoveredMessageIds(state), imageTokens), density);
+  // beforeTokens on the same CJK-aware scale as the kernel's countTokens, so
+  // "X → Y (~Z reclaimed)" compares like-for-like.
+  const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state), imageTokens);
   const summaryMaxChars = args.summaryMaxChars;
   const topLevelTopic = args.topic;
 
   debug.event("compress-in", {
     sid: ctx.sessionManager.getSessionId(),
     modelId,
-    density,
     ranges: ranges.length,
     spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
@@ -215,9 +212,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     messages: coreMessages,
     state: applied.state,
     config,
-    tokenCount: calibrateTokens(sentTokens, density),
+    tokenCount: sentTokens,
   });
-  const afterTokens = calibrateTokens(estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens), density);
+  const afterTokens = estimateTokens(afterTurn.messages, collectCoveredMessageIds(applied.state), imageTokens);
   const reclaimed = Math.max(0, beforeTokens - afterTokens);
 
   const newBlocks = applied.state.blocks.slice(-blocksCreated);
