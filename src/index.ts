@@ -37,7 +37,7 @@ import {
 } from "./throttle-retry.js";
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
-import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { applyOutputHeadroom, inspectOverflowMessage } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 type AgentMessage = SessionMessageEntry["message"];
@@ -176,6 +176,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
+    runtime.dropTokenScale(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -214,20 +215,13 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // Output headroom: reserve the model's max output budget from the window
       // so the kernel's nudge/truncate bands sit below (window - maxTokens) —
       // the context then always leaves room for the model's reply, preventing
-      // the "context + output > window" overflow on a small window. maxTokens is
-      // the model's max output capability (ctx.model.maxTokens). Applied to the
-      // (possibly re-centered) window above; never mutates the shared config.
-      // Anthropic is exempt — its input limit is enforced independently of
-      // max_tokens, so reserving would shift every band down by maxTokens with
-      // no safety gain (see shouldReserveOutputHeadroom).
-      const maxOutput = (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0;
-      if (shouldReserveOutputHeadroom((ctx.model as { api?: string } | undefined)?.api)) {
-        const reservedWindow = reserveOutputHeadroom(config.modelContextLimit, maxOutput);
-        if (reservedWindow !== config.modelContextLimit) {
-          const before = config.modelContextLimit;
-          config = { ...config, modelContextLimit: reservedWindow };
-          logInfo("overflow-selfheal", { sid, event: "output-headroom", before, after: reservedWindow, maxOutput });
-        }
+      // the "context + output > window" overflow on a small window. Applied to
+      // the (possibly re-centered) window above; never mutates the shared
+      // config. Anthropic is exempt (see applyOutputHeadroom).
+      const beforeHeadroom = config.modelContextLimit;
+      config = applyOutputHeadroom(config, ctx.model);
+      if (config.modelContextLimit !== beforeHeadroom) {
+        logInfo("overflow-selfheal", { sid, event: "output-headroom", before: beforeHeadroom, after: config.modelContextLimit, maxOutput: (ctx.model as { maxTokens?: number } | undefined)?.maxTokens ?? 0 });
       }
       const coveredIds = collectCoveredMessageIds(state);
       // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
@@ -247,10 +241,21 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // estimate. Only ever raises (never lowers); skipped while the anchor
       // predates a successful compress (floor-stale.ts). tokenCount only
       // feeds processTurn.
+      const anchorStale = usageAnchorPredatesCompression(entries);
       let tokenCount = sentTokens;
       const realPromptTokens = realUsage?.tokens ?? 0;
-      if (!usageAnchorPredatesCompression(entries) && realPromptTokens > tokenCount) {
+      if (!anchorStale && realPromptTokens > tokenCount) {
         tokenCount = realPromptTokens;
+      }
+      // Growth scale guard (issue #267): the meter switches rulers when the
+      // anchor flips stale↔not-stale (estimate ↔ provider). A growth delta
+      // spanning that switch is a false artifact, not real growth, so reset the
+      // growth baseline on the flip. The usage bands above keep the floor-stale
+      // behavior untouched — only the growth reference is re-anchored.
+      if (runtime.noteTokenScale(sid, anchorStale)) {
+        state.nudge.lastNudgeShownTokens = 0;
+        state.nudge.lastPerMessageNudgeTokens = 0;
+        logInfo("growth-scale", { sid, event: "scale-flip-reset", anchorStale });
       }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
