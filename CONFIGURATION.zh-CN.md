@@ -320,7 +320,16 @@
   - **Streak** —— 连续 `afterIgnores` 轮 over-limit 且模型未压缩后，扩展自动压缩最大的可压缩范围。
   - **硬阈值** —— 用量达到 `hardThreshold` 时，扩展立即自动压缩，与 streak 无关。
 
-  被自动压缩的范围会写入一份诚实的、带标签的机械摘要（块可通过 `decompress` 完整还原）。模型主动 `compress` 成功会重置 streak；用量低于 `targetPct` 时不触发。设 `compress.autoCompress: false` 可禁用强制压缩，仅依赖 nudge。
+  一组护栏防止强制压缩在深度压缩区间（剩余可压缩内容很少、每次触发的块开销可能超过收益）中适得其反：
+
+  - **净收益下限** —— 所选范围在扣除摘要开销后至少节省 `minEnforceNetGain` tokens，否则跳过本次。
+  - **每范围仅一次** —— 本会话中已强制压缩过的范围不会再次被强制压缩。
+  - **会话预算** —— 每会话最多 `enforceBudget` 次强制压缩。
+  - **冷却** —— 非硬阈值触发要求自上次触发以来新增至少 `cooldownGrowth × nudge.minGrowthFloor` tokens 的内容（硬阈值绕过冷却）。
+  - **模型驱动优先** —— 模型自身成功完成 `compress` 时，当轮跳过强制压缩（否则会覆盖模型自己的压缩）。
+  - **对模型不可见** —— 强制压缩写入与模型驱动压缩无法区分的中性机械摘要；模型不会被告知发生了强制压缩（仅宿主 UI 收到通知），因此不会通过 decompress/recompress 做出反应。
+
+  被自动压缩的块可通过 `decompress` 完整还原。用量低于 `targetPct` 时不触发。设 `compress.autoCompress: false` 可禁用强制压缩，仅依赖 nudge。
 
   作为对象时，每个字段可选并覆盖默认值：
 
@@ -331,6 +340,9 @@
   | `hardThreshold` | number \| string | `0.95`（或 `"95%"`） | 立即触发的用量阈值。 |
   | `targetPct` | number \| string | `0.80`（或 `"80%"`） | 自动压缩后的目标用量；贪心选范围直到 projected usage 低于此值。 |
   | `maxRanges` | number | `5` | 单次强制压缩最多压缩的范围数。 |
+  | `minEnforceNetGain` | number | `5000` | 单次触发所需的最低净节省 tokens（范围减去摘要开销）。 |
+  | `enforceBudget` | number | `5` | 每会话强制压缩次数的硬上限。 |
+  | `cooldownGrowth` | number | `5` | 非硬阈值触发之间所需的新内容倍数（`× nudge.minGrowthFloor`）。 |
 
 ```json
 {

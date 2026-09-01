@@ -300,7 +300,10 @@ test("noteCompressOutcomes: no-op panels advance the counter toward the cap", ()
 
 test("emergency nudge stops re-injecting once the turn's cap is burned (issue #6 loop breaker)", async () => {
   const { api, handlers } = captureApi();
-  createAcpExtension({ modelContextLimit: 180_000 })(api as any);
+  // autoCompress off: this test isolates the emergency-nudge retry cap (issue #6).
+  // The server-side enforcement (issue #269) would otherwise compress the context
+  // and drop usage below emergency, masking the cap behavior under test.
+  createAcpExtension({ modelContextLimit: 180_000, compress: { autoCompress: false } })(api as any);
   const stateFile = "/tmp/pai-acp-retry-emerg.session.json";
   await rm(`${stateFile}.acp.json`, { force: true });
 

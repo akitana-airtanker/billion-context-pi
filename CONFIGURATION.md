@@ -328,7 +328,16 @@ The flow is:
   - **Streak** — after `afterIgnores` consecutive over-limit turns where the model did not compress, the extension auto-compresses the largest compressible ranges.
   - **Hard threshold** — once usage reaches `hardThreshold`, the extension auto-compresses immediately, regardless of the streak.
 
-  The auto-compressed ranges get an honest, labeled mechanical summary (the block is fully restorable via `decompress`). A successful model-driven `compress` resets the streak, and enforcement never fires below `targetPct`. Set `compress.autoCompress: false` to disable enforcement and rely on nudges alone.
+  Guardrails keep enforcement from backfiring in deep-compressed regimes (where the remaining compressible content is small and the overhead of each fired block can exceed its savings):
+
+  - **Net-gain floor** — a pass is skipped unless the picked ranges save at least `minEnforceNetGain` tokens after subtracting the summary overhead.
+  - **Per-range once** — a range enforced in this session is never enforced again.
+  - **Session budget** — at most `enforceBudget` enforcement passes per session.
+  - **Cooldown** — non-hard passes require at least `cooldownGrowth × nudge.minGrowthFloor` tokens of new content since the last pass (the hard threshold bypasses the cooldown).
+  - **Model-driven wins** — when the model itself completes a successful `compress`, enforcement is skipped for that turn (it would only stomp on the model's own compression).
+  - **Invisible to the model** — enforcement writes a neutral mechanical summary indistinguishable from a model-driven one; the model is never told a pass was enforced (only the host UI is notified), so it cannot react by decompressing/recompressing.
+
+  The auto-compressed block is fully restorable via `decompress`. Enforcement never fires below `targetPct`. Set `compress.autoCompress: false` to disable enforcement and rely on nudges alone.
 
   As an object, each field is optional and overrides the default:
 
@@ -339,6 +348,9 @@ The flow is:
   | `hardThreshold` | number \| string | `0.95` (or `"95%"`) | Usage at which enforcement fires immediately. |
   | `targetPct` | number \| string | `0.80` (or `"80%"`) | Target usage after auto-compress; ranges are picked greedily until projected usage drops below this. |
   | `maxRanges` | number | `5` | Cap on the number of ranges compressed in a single enforcement pass. |
+  | `minEnforceNetGain` | number | `5000` | Minimum net tokens saved (ranges minus summary overhead) for a pass to fire. |
+  | `enforceBudget` | number | `5` | Hard cap on enforcement passes per session. |
+  | `cooldownGrowth` | number | `5` | New-content multiplier (`× nudge.minGrowthFloor`) required between non-hard passes. |
 
 ```json
 {

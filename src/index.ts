@@ -305,7 +305,7 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       // largest compressible ranges ourselves so context stays bounded.
       const acSettings = resolveAutoCompress(runtime.adapter.compress);
       if (acSettings.enabled) {
-        const ac = await maybeAutoCompress({ runtime, ctx, config, coreMessages, turn, tokenCount, turnKey, sid, settings: acSettings, compressOutcomes });
+        const ac = await maybeAutoCompress({ runtime, ctx, config, coreMessages, turn, tokenCount, sid, settings: acSettings, compressOutcomes });
         if (ac) turn = ac.turn;
       }
 

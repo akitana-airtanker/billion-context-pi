@@ -59,10 +59,12 @@ function fakeCtx(entries: any[], stateFile: string) {
 const LIMIT = 200_000;
 const OLDER = "中".repeat(1500); // 1500 CJK tokens each
 
-// 10 large older + 5 small recent. preserveRecentTokens(5000)+preserveRecentMessages(5)
-// protect the tail; the 10-message older zone leaves a >= 5000-char compressible range.
-function makeEntries() {
-  const older = Array.from({ length: 10 }, (_, i) => userMsg(`e${i + 1}`, OLDER));
+// `olderCount` large older + 5 small recent. preserveRecentTokens(5000)+
+// preserveRecentMessages(5) protect the tail; the older zone leaves a >= 5000-char
+// compressible range. 20 older → 7 ranges (groups of 3) so a first pass (maxRanges 5)
+// leaves ranges for a second pass (budget/cooldown tests).
+function makeEntries(olderCount = 10) {
+  const older = Array.from({ length: olderCount }, (_, i) => userMsg(`e${i + 1}`, OLDER));
   const recent = Array.from({ length: 5 }, (_, i) => userMsg(`r${i + 1}`, "ok"));
   return [...older, ...recent];
 }
@@ -80,11 +82,11 @@ async function fire(handlers: Map<string, any[]>, ctx: any) {
   await handlers.get("context")![0]!({ type: "context", messages: [] }, ctx);
 }
 
-function setup(adapter: Record<string, unknown>, stateFile: string) {
+function setup(adapter: Record<string, unknown>, stateFile: string, olderCount = 10) {
   const { api, handlers } = captureApi();
   createAcpExtension(adapter as any)(api as any);
   rmSync(`${stateFile}.acp.json`, { force: true });
-  const ctx = fakeCtx(makeEntries(), stateFile);
+  const ctx = fakeCtx(makeEntries(olderCount), stateFile);
   return { handlers, ctx };
 }
 
@@ -103,22 +105,31 @@ test("resolveAutoCompress: false disables but keeps other defaults", () => {
   assert.equal(s.hardThreshold, AUTO_COMPRESS_DEFAULTS.hardThreshold);
 });
 
-test("resolveAutoCompress: object merges + parses percent strings", () => {
-  const s = resolveAutoCompress({ autoCompress: { afterIgnores: 5, hardThreshold: "90%", targetPct: "70%", maxRanges: 2 } });
+test("resolveAutoCompress: object merges + parses percent strings + guardrail fields", () => {
+  const s = resolveAutoCompress({
+    autoCompress: { afterIgnores: 5, hardThreshold: "90%", targetPct: "70%", maxRanges: 2, minEnforceNetGain: 8000, enforceBudget: 3, cooldownGrowth: 7 },
+  });
   assert.equal(s.enabled, true);
   assert.equal(s.afterIgnores, 5);
   assert.equal(s.hardThreshold, 0.9);
   assert.equal(s.targetPct, 0.7);
   assert.equal(s.maxRanges, 2);
+  assert.equal(s.minEnforceNetGain, 8000);
+  assert.equal(s.enforceBudget, 3);
+  assert.equal(s.cooldownGrowth, 7);
 });
 
-test("AutoCompressEpisode.reset clears streak + lastAutoCompressedTurnKey", () => {
+test("AutoCompressEpisode.reset clears streak, fireCount, enforcedRanges, lastEnforcedTokenCount", () => {
   const ep = new AutoCompressEpisode();
   ep.streak = 3;
-  ep.lastAutoCompressedTurnKey = "m00005";
+  ep.fireCount = 2;
+  ep.enforcedRanges.add("m00001..m00002");
+  ep.lastEnforcedTokenCount = 12345;
   ep.reset();
   assert.equal(ep.streak, 0);
-  assert.equal(ep.lastAutoCompressedTurnKey, null);
+  assert.equal(ep.fireCount, 0);
+  assert.equal(ep.enforcedRanges.size, 0);
+  assert.equal(ep.lastEnforcedTokenCount, 0);
 });
 
 test("pickAutoRanges: greedy largest-first, stops at target or maxRanges", () => {
@@ -142,15 +153,16 @@ test("pickAutoRanges: empty when no nudge", () => {
   assert.deepEqual(pickAutoRanges(undefined, 0.9, 200_000, AUTO_COMPRESS_DEFAULTS), []);
 });
 
-test("buildHeuristicSummary: labeled per-message index with snippet truncation", () => {
+test("buildHeuristicSummary: neutral per-message index, no enforcement/decompress framing", () => {
   const msgs = [
     { id: "a", role: "user", contentType: "text", text: "hello " + "x".repeat(300) },
     { id: "b", role: "assistant", contentType: "tool-call", toolName: "bash", text: "ls -la" },
     { id: "c", role: "assistant", contentType: "tool-result", toolName: "bash", text: "file1 file2" },
   ] as any[];
   const s = buildHeuristicSummary(msgs, "m00001", "m00003");
-  assert.ok(s.includes("AUTO-COMPRESSED by ACP enforcement"));
-  assert.ok(s.includes("Range m00001..m00003"));
+  assert.ok(s.includes("Summary of m00001..m00003 (3 message(s))"));
+  assert.ok(!s.toLowerCase().includes("enforcement"), "must not frame as enforcement (V3 churn trigger)");
+  assert.ok(!s.toLowerCase().includes("decompress"), "must not prompt decompress (V3 churn trigger)");
   assert.ok(s.includes("[user] hello"));
   assert.ok(s.includes("[tool-call bash] ls -la"));
   assert.ok(s.includes("[tool-result bash] file1 file2"));
@@ -205,4 +217,49 @@ test("e2e: auto-compress disabled → no enforcement blocks", async () => {
   ctx.__setUsage(0.96 * LIMIT);
   for (let i = 0; i < 5; i++) await fire(handlers, ctx);
   assert.equal(readBlocks(stateFile).length, 0, "no blocks when autoCompress disabled");
+});
+
+// Budget/cooldown cap the number of FIRES, not blocks — one fire compresses up to
+// maxRanges ranges (multiple blocks). So assert on block-count STABILITY across
+// fires: a capped fire adds no blocks. 40 older msgs → ~12 merged ranges, so a
+// first fire (≤ maxRanges) leaves ranges for a second fire to prove the gate.
+test("e2e: enforceBudget caps the number of enforcement fires", async () => {
+  const stateFile = "/tmp/pai-acp-auto-budget.session.json";
+  const { handlers, ctx } = setup({ modelContextLimit: LIMIT, compress: { autoCompress: { enforceBudget: 1 } } }, stateFile, 40);
+  ctx.__setUsage(0.96 * LIMIT); // hard threshold; budget=1 allows exactly one fire
+  await fire(handlers, ctx);
+  const afterFirst = readBlocks(stateFile).length;
+  assert.ok(afterFirst >= 1, "first fire creates blocks");
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx);
+  assert.equal(readBlocks(stateFile).length, afterFirst, "budget=1 → no further fires");
+});
+
+test("e2e: minEnforceNetGain blocks a pass whose net gain is too small", async () => {
+  const stateFile = "/tmp/pai-acp-auto-netgain.session.json";
+  const { handlers, ctx } = setup({ modelContextLimit: LIMIT, compress: { autoCompress: { minEnforceNetGain: 1_000_000 } } }, stateFile);
+  ctx.__setUsage(0.96 * LIMIT);
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx);
+  assert.equal(readBlocks(stateFile).length, 0, "net gain below minEnforceNetGain → no fire");
+});
+
+test("e2e: cooldown blocks a second streak fire when no new content accumulated", async () => {
+  const stateFile = "/tmp/pai-acp-auto-cooldown.session.json";
+  const { handlers, ctx } = setup({ modelContextLimit: LIMIT, compress: { autoCompress: { cooldownGrowth: 5 } } }, stateFile, 40);
+  ctx.__setUsage(0.85 * LIMIT); // streak trigger (not hard); fixed usage → no token growth between fires
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx); // streak trips at fire 3
+  const afterFirst = readBlocks(stateFile).length;
+  assert.ok(afterFirst >= 1, "first streak fire creates blocks");
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx); // streak trips again at fire 6, but cooldown blocks
+  assert.equal(readBlocks(stateFile).length, afterFirst, "cooldown blocks the second streak fire");
+});
+
+test("e2e: cooldownGrowth=0 allows a second streak fire (control)", async () => {
+  const stateFile = "/tmp/pai-acp-auto-cooldown-off.session.json";
+  const { handlers, ctx } = setup({ modelContextLimit: LIMIT, compress: { autoCompress: { cooldownGrowth: 0 } } }, stateFile, 40);
+  ctx.__setUsage(0.85 * LIMIT);
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx); // streak trips at fire 3
+  const afterFirst = readBlocks(stateFile).length;
+  assert.ok(afterFirst >= 1, "first streak fire creates blocks");
+  for (let i = 0; i < 3; i++) await fire(handlers, ctx); // streak trips again at fire 6, no cooldown → fires
+  assert.ok(readBlocks(stateFile).length > afterFirst, "no cooldown → second streak fire adds blocks");
 });

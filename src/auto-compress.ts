@@ -34,6 +34,17 @@ export interface AutoCompressConfig {
   targetPct?: number | string;
   /** Max ranges compressed in a single enforcement pass. Default: 5. */
   maxRanges?: number;
+  /** Minimum net token reduction (range tokens − placeholder summary tokens) a
+   *  single pass must achieve to fire. Guards against over-injection in the
+   *  deep-compressed regime where the meta-overhead would outpace the savings.
+   *  Default: 5000. */
+  minEnforceNetGain?: number;
+  /** Hard cap on enforcement fires per session. The meta-overhead is monotone in
+   *  fire count, so this bounds cumulative pollution. Default: 5. */
+  enforceBudget?: number;
+  /** Cooldown, in multiples of the kernel's nudge growth floor (minGrowthFloor),
+   *  of new tokens that must accumulate between fires. Default: 5. */
+  cooldownGrowth?: number;
 }
 
 export interface AutoCompressSettings {
@@ -42,6 +53,9 @@ export interface AutoCompressSettings {
   hardThreshold: number;
   targetPct: number;
   maxRanges: number;
+  minEnforceNetGain: number;
+  enforceBudget: number;
+  cooldownGrowth: number;
 }
 
 export const AUTO_COMPRESS_DEFAULTS: AutoCompressSettings = {
@@ -50,6 +64,9 @@ export const AUTO_COMPRESS_DEFAULTS: AutoCompressSettings = {
   hardThreshold: 0.95,
   targetPct: 0.80,
   maxRanges: 5,
+  minEnforceNetGain: 5000,
+  enforceBudget: 5,
+  cooldownGrowth: 5,
 };
 
 function parsePct(v: number | string): number {
@@ -73,20 +90,27 @@ export function resolveAutoCompress(compress?: { autoCompress?: boolean | AutoCo
       hardThreshold: ac.hardThreshold !== undefined ? parsePct(ac.hardThreshold) : AUTO_COMPRESS_DEFAULTS.hardThreshold,
       targetPct: ac.targetPct !== undefined ? parsePct(ac.targetPct) : AUTO_COMPRESS_DEFAULTS.targetPct,
       maxRanges: ac.maxRanges ?? AUTO_COMPRESS_DEFAULTS.maxRanges,
+      minEnforceNetGain: ac.minEnforceNetGain ?? AUTO_COMPRESS_DEFAULTS.minEnforceNetGain,
+      enforceBudget: ac.enforceBudget ?? AUTO_COMPRESS_DEFAULTS.enforceBudget,
+      cooldownGrowth: ac.cooldownGrowth ?? AUTO_COMPRESS_DEFAULTS.cooldownGrowth,
     };
   }
   return { ...AUTO_COMPRESS_DEFAULTS };
 }
 
-/** Per-session enforcement episode: how many consecutive over-limit nudges the
- *  model has ignored, plus the last turnKey that was auto-compressed (prevents
- *  re-firing within the same user turn). */
+/** Per-session enforcement episode: the consecutive over-limit nudge streak, the
+ *  session fire budget, the ranges already server-compressed (perRangeOnce), and
+ *  the token count at the last fire (cooldown). */
 export class AutoCompressEpisode {
   streak = 0;
-  lastAutoCompressedTurnKey: string | null = null;
+  fireCount = 0;
+  enforcedRanges = new Set<string>();
+  lastEnforcedTokenCount = 0;
   reset(): void {
     this.streak = 0;
-    this.lastAutoCompressedTurnKey = null;
+    this.fireCount = 0;
+    this.enforcedRanges.clear();
+    this.lastEnforcedTokenCount = 0;
   }
 }
 
@@ -157,13 +181,14 @@ function summarizeOne(m: CoreMessage): string {
   return `[${label}] ${snippet}`;
 }
 
-/** Mechanical, honest summary for an enforcement pass: no model wrote it, so it
- *  is a truncated per-message index that points at decompress for the full
- *  original content (the block's effectiveMessageIds allow a full restore). */
+/** Per-message index used as the block summary for an enforcement pass. Kept
+ *  deliberately neutral (no "enforcement"/"decompress" framing) so the placeholder
+ *  is indistinguishable from a model-driven summary in the next prompt — the
+ *  "you may refine via decompress" wording is a model-react churn trigger. The
+ *  block's effectiveMessageIds still allow a full restore. */
 export function buildHeuristicSummary(messages: CoreMessage[], startRef: string, endRef: string): string {
   const lines: string[] = [
-    "AUTO-COMPRESSED by ACP enforcement: the model ignored repeated compression nudges, so this range was compressed mechanically (no model-written summary). The lines below are a truncated index of each message; call decompress to restore the full original content if you need details.",
-    `Range ${startRef}..${endRef} — ${messages.length} message(s):`,
+    `Summary of ${startRef}..${endRef} (${messages.length} message(s))`,
   ];
   for (const m of messages) lines.push(`- ${summarizeOne(m)}`);
   let out = lines.join("\n");
@@ -178,7 +203,6 @@ export interface AutoCompressInput {
   coreMessages: CoreMessage[];
   turn: ProcessTurnResult;
   tokenCount: number;
-  turnKey: string;
   sid: string;
   settings: AutoCompressSettings;
   compressOutcomes: ReadonlyArray<{ success: boolean }>;
@@ -199,7 +223,7 @@ export interface AutoCompressOutcome {
  *  so the caller can rebuild + inject the nudge from post-compression state.
  *  Returns null when nothing should (or could) be compressed. */
 export async function maybeAutoCompress(input: AutoCompressInput): Promise<AutoCompressOutcome | null> {
-  const { runtime, ctx, config, coreMessages, turn, tokenCount, turnKey, sid, settings, compressOutcomes } = input;
+  const { runtime, ctx, config, coreMessages, turn, tokenCount, sid, settings, compressOutcomes } = input;
   const ep = runtime.autoCompressFor(sid);
   const limit = config.modelContextLimit;
   const usage = limit > 0 ? tokenCount / limit : 0;
@@ -209,18 +233,26 @@ export async function maybeAutoCompress(input: AutoCompressInput): Promise<AutoC
   const hasContent = turn.nudge?.shouldInject === true;
   const anySuccess = compressOutcomes.some((o) => o.success);
 
-  if (anySuccess) ep.streak = 0;
-  else if (overLimit && hasContent) ep.streak += 1;
+  if (anySuccess) {
+    ep.streak = 0;
+    return null;
+  }
+  if (overLimit && hasContent) ep.streak += 1;
   else ep.streak = 0;
 
   const hard = limit > 0 && usage >= settings.hardThreshold;
   const streakTripped = ep.streak >= settings.afterIgnores;
   if (!hard && !streakTripped) return null;
   if (!hasContent) return null;
-  if (ep.lastAutoCompressedTurnKey === turnKey) return null;
   if (limit <= 0 || usage <= settings.targetPct) return null;
+  if (ep.fireCount >= settings.enforceBudget) return null;
+  if (!hard && ep.lastEnforcedTokenCount > 0) {
+    const growthFloor = config.nudge?.minGrowthFloor ?? 5000;
+    if (tokenCount - ep.lastEnforcedTokenCount < settings.cooldownGrowth * growthFloor) return null;
+  }
 
-  const ranges = pickAutoRanges(turn.nudge, usage, limit, settings);
+  const ranges = pickAutoRanges(turn.nudge, usage, limit, settings)
+    .filter((r) => !ep.enforcedRanges.has(`${r.startRef}..${r.endRef}`));
   if (ranges.length === 0) return null;
 
   const refMap = turn.state.messageRefs;
@@ -231,10 +263,16 @@ export async function maybeAutoCompress(input: AutoCompressInput): Promise<AutoC
     topic: AUTO_TOPIC,
   }));
 
+  const rangeTokens = ranges.reduce((s, r) => s + r.tokens, 0);
+  const summaryTokens = specs.reduce((s, sp) => s + Math.ceil(sp.summary.length / 4), 0);
+  if (rangeTokens - summaryTokens < settings.minEnforceNetGain) {
+    logWarn("auto-compress", { sid, event: "low-net-gain", rangeTokens, summaryTokens, min: settings.minEnforceNetGain });
+    return null;
+  }
+
   const applied = runtime.core.applyCompression({ ranges: specs, messages: turn.messages, state: turn.state, config });
   const { blocksCreated, tokensCompressed, errors } = applied.result;
   if (blocksCreated === 0) {
-    ep.lastAutoCompressedTurnKey = turnKey;
     logWarn("auto-compress", { sid, event: "no-blocks", ranges: ranges.length, errors: errors.slice(0, 3) });
     return null;
   }
@@ -242,9 +280,11 @@ export async function maybeAutoCompress(input: AutoCompressInput): Promise<AutoC
   const newTurn = runtime.core.processTurn({ messages: coreMessages, state: applied.state, config, tokenCount });
   const reason: "hard" | "streak" = hard ? "hard" : "streak";
   const streakBefore = ep.streak;
-  ep.lastAutoCompressedTurnKey = turnKey;
   ep.streak = 0;
-  logInfo("auto-compress", { sid, event: "applied", reason, usageBefore: Math.round(usage * 100), blocksCreated, tokensCompressed, ranges: ranges.length, streakBefore });
+  ep.fireCount += 1;
+  ep.lastEnforcedTokenCount = tokenCount;
+  for (const r of ranges) ep.enforcedRanges.add(`${r.startRef}..${r.endRef}`);
+  logInfo("auto-compress", { sid, event: "applied", reason, usageBefore: Math.round(usage * 100), blocksCreated, tokensCompressed, ranges: ranges.length, streakBefore, fireCount: ep.fireCount, netGain: rangeTokens - summaryTokens });
   debug.event("auto-compress", { sid, reason, usageBefore: Math.round(usage * 100), blocksCreated, tokensCompressed, spans: ranges.map((r) => `${r.startRef}..${r.endRef}`) });
   if (ctx.hasUI) {
     const pct = Math.round(usage * 100);
