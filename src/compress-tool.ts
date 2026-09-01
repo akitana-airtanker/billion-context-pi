@@ -77,13 +77,44 @@ type RangeEntry = Static<typeof RangeSpec>;
 // the failure cap (a returned string would land as isError:false and count
 // as neutral). An empty array passes through (the call site returns "No
 // ranges provided.").
-function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
-  const { ranges, diagnostics } = parseCompressArgs(args);
+export function normalizeRanges(args: CompressArgs): RangeEntry[] | string {
+  const effective = repairContentTail(args);
+  const { ranges, diagnostics } = parseCompressArgs(effective);
   if (ranges.length === 0) {
-    if (Array.isArray(args.content) && args.content.length === 0) return [];
-    return describeDiagnostics(diagnostics, args.content);
+    if (Array.isArray(effective.content) && effective.content.length === 0) return [];
+    return describeDiagnostics(diagnostics, effective.content);
   }
   return ranges.map((r) => ({ startId: r.startRef, endId: r.endRef, summary: r.summary, topic: r.topic }));
+}
+
+// Qwen-family models in non-strict tool-call mode sometimes emit the `content`
+// array as a JSON-encoded string whose LAST entry object is missing its closing
+// `}` (tail `"]` instead of `"}]`). The kernel's lenient parser then drops that
+// last range — or every range, when it is the only one — and reports a
+// misleading "truncated"/"no-valid-ranges" diagnostic. Repair the brace before
+// delegating so the whole array parses. Args are returned unchanged when the
+// repair does not apply.
+function repairContentTail(args: CompressArgs): CompressArgs {
+  if (typeof args.content !== "string") return args;
+  const repaired = tailRepair(args.content);
+  return repaired === undefined ? args : { ...args, content: repaired };
+}
+
+// Deterministic tail-repair: if the trimmed string ends with `"]` and the char
+// before it is a closing `"`, retry the parse with `"}]` appended. A valid JSON
+// array never still parses after appending `}`, so this has no false positives.
+export function tailRepair(s: string): string | undefined {
+  const t = s.trimEnd();
+  if (!t.endsWith("]")) return undefined;
+  const body = t.slice(0, -1).trimEnd();
+  if (!body.endsWith('"')) return undefined;
+  const candidate = body + "}]";
+  try {
+    if (Array.isArray(JSON.parse(candidate))) return candidate;
+  } catch {
+    // not the missing-brace case
+  }
+  return undefined;
 }
 
 function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: CompressArgs["content"]): string {
@@ -97,7 +128,26 @@ function describeDiagnostics(diagnostics: CompressParseDiagnostics, content: Com
   if (diagnostics.invalidItems > 0) {
     return `${base}; ${diagnostics.invalidItems} entr${diagnostics.invalidItems === 1 ? "y was" : "ies were"} dropped as invalid. Each range must be an object with string fields startId, endId, summary.`;
   }
+  const parseErr = jsonParseError(content);
+  if (parseErr !== undefined) {
+    return `${base}; the JSON failed to parse: ${parseErr}. Fix the malformed JSON (e.g. a missing closing brace or quote) and retry.`;
+  }
   return `${base}. content must be an ARRAY of {startId, endId, summary} objects.`;
+}
+
+// Short diagnostic for why a JSON-shaped string fails to parse, or undefined
+// when it parses fine or is not JSON-shaped. Gives the model a retryable signal
+// (the parser's own position) instead of the misleading "must be an ARRAY".
+function jsonParseError(content: CompressArgs["content"]): string | undefined {
+  if (typeof content !== "string") return undefined;
+  const t = content.trim();
+  if (!t.startsWith("{") && !t.startsWith("[")) return undefined;
+  try {
+    JSON.parse(t);
+    return undefined;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
+  }
 }
 
 /** Panel block count ("… (~N reclaimed, B blocks)"), or -1 for non-panels. */
