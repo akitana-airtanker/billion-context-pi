@@ -40,6 +40,11 @@ export function isPiHost(sm: ExtensionContext["sessionManager"]): boolean {
 
 export interface AcpRuntime {
   core: CompressionCore;
+  /** Set when the host is unsupported (currently: OMP / oh-my-pi). Once true,
+   *  the extension stands down: the context transform, system-prompt injection,
+   *  compaction-cancel and ACP tools all no-op so the host runs untouched.
+   *  Set at session_start (see wireOmpRefusal in src/index.ts). */
+  refused: boolean;
   /** Per-session provider-throttle retry episode (attempt budget + kick
    *  pacing), keyed by session id so concurrent sessions in one extension
    *  instance cannot share an episode. Reset on session_start and on any
@@ -378,4 +383,5 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     await store.save(state, sm.getSessionFile() ?? undefined, sm.getSessionId());
   }
 
-  return { core, store, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  let refused = false;
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}

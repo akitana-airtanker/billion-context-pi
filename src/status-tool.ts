@@ -8,6 +8,7 @@ import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";
+import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -33,6 +34,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     ],
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
         result = await handleStatus(params as StatusArgs, runtime, ctx);
