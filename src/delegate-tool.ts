@@ -29,6 +29,12 @@ const ASYNC_TIMEOUT_MS = 30 * 60_000;
 const KILL_GRACE_MS = 10_000;
 const RESULT_SUMMARY_CHARS = 500;
 const OUT_DIR = join(tmpdir(), "acp-delegate");
+// Coalesce completion notifications: each sendUserMessage follow-up costs a
+// full model turn, so N near-simultaneous finishes merge into ONE message
+// (issue #157). The trailing window (NOTIFY_COALESCE_MS) never extends more
+// than NOTIFY_COALESCE_MAX_MS past the first queued completion.
+const NOTIFY_COALESCE_MS = 2_000;
+const NOTIFY_COALESCE_MAX_MS = 10_000;
 const SESSION_EXT = ".session.jsonl";
 const ACTIVITY_TAIL_CHARS = 400;
 
@@ -196,6 +202,9 @@ interface DelegateRun {
   usageReported?: boolean;
   /** True once agent_settled fired; a watchdog kill after this is stuck teardown, not a timeout. */
   agentSettled?: boolean;
+  /** True while the run sits in the coalescing notification queue (scheduled
+   *  for the next batched flush, not yet delivered). */
+  notifyQueued?: boolean;
 }
 const runs = new Map<string, DelegateRun>();
 
@@ -510,10 +519,11 @@ function remainingLineForWait(selfRunId: string): string {
 }
 
 /** Runs that reached a terminal state but whose result never reached the
- *  model: no parked waiter, not consumed by a tool result, and never injected
- *  as a notification. The model was promised a notification ("do NOT keep
- *  waiting"), so these must eventually be recovered, or a failed delegate
- *  stays invisible until the very end of the task. */
+ *  model: no parked waiter, not consumed by a tool result, never injected
+ *  as a notification, and not sitting in the coalescing queue (a scheduled
+ *  batch is not a lost delivery). The model was promised a notification
+ *  ("do NOT keep waiting"), so these must eventually be recovered, or a
+ *  failed delegate stays invisible until the very end of the task. */
 export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): DelegateRun[] {
   return all.filter(
     (r) =>
@@ -521,7 +531,8 @@ export function findUndeliveredRuns(all: DelegateRun[], excludeRunId?: string): 
       (r.status === "completed" || r.status === "failed") &&
       !r.waiter &&
       !r.consumed &&
-      !r.injected,
+      !r.injected &&
+      !r.notifyQueued,
   );
 }
 
@@ -550,6 +561,162 @@ export function undeliveredNoticeFrom(all: DelegateRun[], excludeRunId?: string)
 
 function undeliveredNotice(excludeRunId?: string): string {
   return undeliveredNoticeFrom(Array.from(runs.values()), excludeRunId);
+}
+
+// ─── Coalesced completion notifications (#157) ─────────────────────────────
+// Each injected notification is a follow-up turn for the model; delegates that
+// finish close together must share ONE message instead of piling up in the
+// queue. A trailing-edge debounce (reset by every new completion, capped at
+// NOTIFY_COALESCE_MAX_MS from the first) batches simultaneous finishers while
+// keeping worst-case delivery latency low.
+
+let notifyPi: ExtensionAPI | undefined;
+const notifyQueue: DelegateRun[] = [];
+let notifyTimer: ReturnType<typeof setTimeout> | undefined;
+let notifyWindowStart = 0;
+
+/** Queue a finished run's completion notification for coalesced delivery.
+ *  The flush timer is re-armed (trailing edge) on every call so runs that
+ *  finish together share one message; see NOTIFY_COALESCE_MS. */
+export function scheduleRunNotification(pi: ExtensionAPI, run: DelegateRun): void {
+  if (!notifyQueue.includes(run)) notifyQueue.push(run);
+  run.notifyQueued = true;
+  notifyPi = pi;
+  const now = Date.now();
+  if (!notifyWindowStart) notifyWindowStart = now;
+  const delay = Math.max(0, Math.min(NOTIFY_COALESCE_MS, NOTIFY_COALESCE_MAX_MS - (now - notifyWindowStart)));
+  if (notifyTimer) clearTimeout(notifyTimer);
+  notifyTimer = setTimeout(() => {
+    notifyTimer = undefined;
+    flushDelegateNotifications();
+  }, delay);
+  notifyTimer.unref?.();
+}
+
+/** Deliver every undelivered terminal run (queued + any earlier lost ones) as
+ *  a single injected message. Runs that gained a waiter or were consumed
+ *  while queued are skipped — their result is owned by the wait/cancel path.
+ *  On send failure nothing is marked delivered, so a later carrier recovers
+ *  the batch via the normal undelivered-notice mechanism. */
+export function flushDelegateNotifications(): void {
+  if (notifyTimer) {
+    clearTimeout(notifyTimer);
+    notifyTimer = undefined;
+  }
+  notifyWindowStart = 0;
+  const queued = new Set(notifyQueue.splice(0));
+  for (const r of queued) r.notifyQueued = false;
+  const pi = notifyPi;
+  if (!pi) return;
+  const owned = (r: DelegateRun): boolean =>
+    !r.waiter && !r.consumed && !r.injected && (r.status === "completed" || r.status === "failed");
+  const deliverable: DelegateRun[] = [];
+  const seen = new Set<DelegateRun>();
+  for (const r of queued) {
+    if (owned(r) && !seen.has(r)) {
+      seen.add(r);
+      deliverable.push(r);
+    }
+  }
+  for (const r of findUndeliveredRuns(Array.from(runs.values()))) {
+    if (!seen.has(r)) {
+      seen.add(r);
+      deliverable.push(r);
+    }
+  }
+  if (deliverable.length === 0) return;
+  if (deliverable.length === 1) {
+    const r = deliverable[0]!;
+    const mode = delegateDisplayUsage;
+    const injected = injectResult(
+      pi,
+      r.agent,
+      r.runId,
+      r.task,
+      r.status,
+      r.result?.code ?? null,
+      r.result?.file ?? "",
+      r.timedOut,
+      r.usage,
+      mode,
+      r.usageReported,
+      r.status === "failed" ? r.result?.body : undefined,
+      r.status === "failed" ? r.activityFile : undefined,
+      r.exitSignal,
+    );
+    if (r.usage && !r.usageReported && (mode === "separate" || injected)) r.usageReported = true;
+    r.injected = injected;
+    return;
+  }
+  const mode = delegateDisplayUsage;
+  const failedCount = deliverable.filter((r) => r.status === "failed").length;
+  const okCount = deliverable.length - failedCount;
+  const lost = deliverable.filter((r) => !queued.has(r));
+  const parts: string[] = [];
+  if (lost.length > 0) {
+    parts.push(`⚠️ Recovery notice: ${lost.length} earlier delegate result${lost.length === 1 ? "" : "s"} never reached you (notification delivery failed); included below.`);
+  }
+  parts.push(`[acp_delegate] ${deliverable.length} delegates finished (${okCount} completed${failedCount > 0 ? `, ${failedCount} FAILED` : ""}).`);
+  for (const r of deliverable) parts.push(formatBatchRunSection(r));
+  for (const r of deliverable) {
+    if (mode === "separate" && r.usage && !r.usageReported) addDelegateUsage(r.usage);
+  }
+  parts.push(buildBatchTrailer(deliverable, failedCount > 0, mode));
+  const text = parts.join("\n\n");
+  const send = pi.sendUserMessage;
+  let sent = false;
+  if (typeof send === "function") {
+    try {
+      send.call(pi, text, { deliverAs: "followUp" });
+      sent = true;
+    } catch (err) {
+      logError("delegate", { event: "notify-batch-error", error: String(err), runIds: deliverable.map((r) => r.runId).join(",") });
+    }
+  } else {
+    logWarn("delegate", { event: "notify-batch-skipped", reason: "sendUserMessage unavailable" });
+  }
+  for (const r of deliverable) {
+    if (sent) r.injected = true;
+    if (r.usage && !r.usageReported && (mode === "separate" || sent)) r.usageReported = true;
+  }
+  debug.event("delegate-notify-batch", { count: deliverable.length, failed: failedCount, sent, runIds: deliverable.map((r) => r.runId).join(",") });
+  logInfo("delegate", { event: "notify-batch", count: deliverable.length, failed: failedCount, sent });
+}
+
+/** One per-run section of a batched notification: status header + task +
+ *  result file (+ error excerpt for failed runs). */
+export function formatBatchRunSection(run: DelegateRun): string {
+  const failed = run.status === "failed";
+  const status = failed ? "FAILED ⚠️" : "completed";
+  const timeoutNote = run.timedOut ? ` (timed out: ${run.timedOut})` : "";
+  const header = `[acp_delegate ${status}] **${run.agent}** (runId \`${run.runId}\`, ${exitLabel(run.result?.code ?? null, run.exitSignal)})${timeoutNote}`;
+  return formatPayload(header, run.result?.file ?? "", run.task, failed ? run.result?.body : undefined, failed ? run.activityFile : undefined);
+}
+
+function buildBatchTrailer(batch: DelegateRun[], anyFailed: boolean, mode: "merged" | "separate"): string {
+  const remaining = Array.from(runs.values()).filter((r) => r.status === "running").length;
+  const remainingLine = remaining > 0
+    ? `${remaining} delegate${remaining === 1 ? " is" : "s are"} still running; keep doing other work and their notifications will arrive as they finish.`
+    : "No delegates are currently running.";
+  let usageNote = "";
+  if (mode === "separate") {
+    const totalUsage = getDelegateUsage();
+    if (totalUsage) {
+      const cost = totalUsage.cost.total;
+      const costStr = cost > 0 ? ` ($${cost.toFixed(4)})` : "";
+      usageNote = `\n── Session delegate usage (excluded from main totals) ──\nTokens: ${totalUsage.input.toLocaleString()} in, ${totalUsage.output.toLocaleString()} out (${totalUsage.totalTokens.toLocaleString()} total)${costStr}`;
+    }
+  } else {
+    const batchUsage = batch.reduce<Usage | undefined>(
+      (acc, r) => (r.usage && !r.usageReported ? accumulateUsage(acc, r.usage) : acc),
+      undefined,
+    );
+    if (batchUsage) usageNote = `\nBatch usage: tokens=${batchUsage.totalTokens.toLocaleString()} in=${batchUsage.input.toLocaleString()} out=${batchUsage.output.toLocaleString()}`;
+  }
+  const closing = anyFailed
+    ? "At least one delegate did NOT complete its task — its result is missing from your work. Read the error excerpts (and the result files if present), then decide whether to re-dispatch those tasks before wrapping up. This is an automated system notification, NOT a user message."
+    : "This is an automated system notification, NOT a user message. Read the result files if you need the details, then continue your original task; do not treat this as a new user request.";
+  return `${remainingLine}${usageNote}\n${closing}`;
 }
 
 /** Attach the recovery notice (if any) to a delegate tool result, so a lost
@@ -988,21 +1155,17 @@ async function runDelegate(
             delegateStatusWidget.poke();
             return;
           }
-          const mode = delegateDisplayUsage;
-          const injected = injectResult(pi, args.agent, runId, taskText, run.status, code, file, run.timedOut, run.usage, mode, run.usageReported, run.status === "failed" ? body : undefined, run.status === "failed" ? run.activityFile : undefined, signal);
-          if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
-            run.usageReported = true;
-          }
-          run.injected = injected;
-          debug.event("delegate-done", { runId, code, status: run.status, injected, outLen: output.length, file });
-          logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected, outLen: output.length, file });
+          scheduleRunNotification(pi, run);
+          debug.event("delegate-done", { runId, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
+          logInfo("delegate", { event: "done", runId, agent: args.agent, code, status: run.status, injected: false, queued: true, outLen: output.length, file });
           delegateStatusWidget.poke();
         } catch (err) {
           run.status = "failed";
           run.finishedAt = Date.now();
+          run.result = run.result ?? { code, file: replyFile, body: `result persistence error: ${String(err)}` };
           debug.event("delegate-done-error", { runId, error: String(err) });
           logError("delegate", { event: "done-error", runId, agent: args.agent, error: String(err) });
-          notifyTerminalFailure(pi, run, `result persistence error: ${String(err)}`);
+          notifyTerminalFailure(pi, run);
           delegateStatusWidget.poke();
         }
       })();
@@ -1031,7 +1194,7 @@ async function runDelegate(
         run.result = { code: null, file: replyFile, body };
         debug.event("delegate-spawn-error", { runId, error: String(err) });
         logError("delegate", { event: "spawn-error", runId, agent: args.agent, error: String(err) });
-        if (run.status === "failed") notifyTerminalFailure(pi, run, `spawn error: ${String(err)}`);
+        if (run.status === "failed") notifyTerminalFailure(pi, run);
         else run.waiter?.();
         delegateStatusWidget.poke();
       }
@@ -1287,33 +1450,14 @@ export function injectResult(
 
 /** Deliver a terminal failure that occurred OUTSIDE normal finalize (spawn
  *  error, result persistence error). A parked waiter owns the result; with no
- *  waiter the model must still learn the run failed — inject best-effort, and
- *  runs whose injection also fails land in the undelivered set for recovery. */
-function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun, body: string): void {
+ *  waiter the model must still learn the run failed — the coalescing queue
+ *  delivers it, and runs whose send fails land in the undelivered set for
+ *  recovery. */
+function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun): void {
   const hadWaiter = run.waiter !== undefined;
   run.waiter?.();
   if (hadWaiter || run.consumed) return;
-  const mode = delegateDisplayUsage;
-  const injected = injectResult(
-    pi,
-    run.agent,
-    run.runId,
-    run.task,
-    run.status,
-    run.result?.code ?? null,
-    run.result?.file ?? "",
-    run.timedOut,
-    run.usage,
-    mode,
-    run.usageReported,
-    body,
-    run.activityFile,
-    run.exitSignal,
-  );
-  if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
-    run.usageReported = true;
-  }
-  run.injected = injected;
+  scheduleRunNotification(pi, run);
 }
 
 // Build the lightweight payload: a header, the task title (so the model
