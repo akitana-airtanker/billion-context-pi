@@ -1,5 +1,6 @@
 import { defaultConfig, type Config, type Prompts } from "acp-kernel";
 import type { ThrottleRetryConfig } from "./throttle-retry.js";
+import type { AutoCompressConfig } from "./auto-compress.js";
 
 /** Delegate sub-agent configuration. */
 export interface DelegateConfig {
@@ -51,6 +52,15 @@ export interface CompressConfig extends CompressSettings {
    *  (e.g. "anthropic", "openai", "zhipu") — the same name used in
    *  models.json and `pi --provider`. */
   providers?: Record<string, ProviderCompress>;
+  /** Server-side enforcement (issue #269): when the model keeps ignoring
+   *  over-limit compression nudges, ACP auto-compresses the largest
+   *  compressible ranges itself (heuristic summary, no model) so context stays
+   *  bounded instead of climbing to 95%+ and overflowing. Global (not
+   *  per-provider/model) — it is a safety valve, not a tuning knob. Accepts a
+   *  boolean shorthand (`false` disables) or an AutoCompressConfig object.
+   *  Default: enabled, fires after 3 ignored over-limit nudges or immediately
+   *  at 95% usage. See resolveAutoCompress in src/auto-compress.ts. */
+  autoCompress?: boolean | AutoCompressConfig;
 }
 
 /**

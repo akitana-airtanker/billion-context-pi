@@ -64,6 +64,8 @@ Each message gets an invisible `<acp>` ref tag (`m00001`, `m00002`, ...) visible
 
 Pi's built-in auto-compaction is cancelled — billion-context is the sole context manager.
 
+**Server-side enforcement backstop.** Nudges are advisory — they only work if the model calls `compress`. On long agentic tasks a model can ignore them and climb 75%→95%+. `compress.autoCompress` (default `true`) makes the extension compress the largest compressible ranges itself after repeated ignored over-limit nudges (or hard at 95%), independent of the model. See [CONFIGURATION.md](CONFIGURATION.md#compressautocompress--server-side-enforcement).
+
 ## Plugin compatibility & ordering
 
 billion-context takes over context management by intercepting Pi's `context` event. **Pi has no plugin priority mechanism** — when multiple extensions register handlers for the same event, they run in a fixed sequence (load order), with no `priority`/`weight` field and no way for the user to control the order. The `context` event specifically is a *pipeline*: every handler receives the previous handler's output, there is no short-circuit, and the **last** handler has the final say over what reaches the model.

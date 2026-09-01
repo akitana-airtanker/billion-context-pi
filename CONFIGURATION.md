@@ -125,6 +125,7 @@ All keys below are currently **ACTIVE**.
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | Context threshold that triggers forced compression nudges. |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | Context threshold that triggers emergency truncation. |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | Token growth step for soft compression nudges. |
+| `compress.autoCompress` | boolean \| object | `true` | 🟢 ACTIVE | Server-side enforcement: auto-compress when the model ignores repeated over-limit nudges (or hard at the threshold). |
 
 **Prompts keys**
 
@@ -295,6 +296,7 @@ The flow is:
 1. **Growth-driven soft nudges** (0–75%) — governed by `compress.nudgeGrowthTokens`.
 2. **Forced nudges** (75–95%) — once usage crosses `compress.maxContextLimit`, nudges fire regardless of the growth gate. These are lossless.
 3. **Emergency truncation** (95%+) — once usage crosses `compress.emergencyThresholdPercent`, large tool outputs are truncated to prevent context overflow. This is lossy.
+4. **Server-side enforcement** (`compress.autoCompress`) — if the model keeps ignoring the over-limit nudges, the extension compresses the largest compressible ranges itself, independent of the model. This is the backstop for long agentic tasks where the model never calls `compress`.
 
 ### `compress.maxContextLimit`
 
@@ -316,6 +318,35 @@ The flow is:
 - **Default:** `50000`
 - **Status:** 🟢 ACTIVE
 - **Description:** The token-growth threshold that controls the cadence of **soft** compression nudges. A soft nudge fires roughly every time this many tokens of new compressible content accumulate. A lower value means the model is nudged to compress more often; a higher value means less frequent nudges. This only governs *growth-driven* nudges — once usage crosses `compress.maxContextLimit`, forced nudges take over regardless of this setting. Maps to the kernel settings `nudge.growthFloor` and `nudge.growthCap`.
+
+### `compress.autoCompress` — server-side enforcement
+
+- **Type:** `boolean | object`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** The backstop for when the model **ignores** the compression nudges. Nudges are advisory — they only work if the model actually calls `compress`. On long agentic tasks a model can climb from 75% to 95%+ over many turns without ever compressing. When enabled, the extension enforces compression **server-side**, independent of the model, in two ways:
+  - **Streak** — after `afterIgnores` consecutive over-limit turns where the model did not compress, the extension auto-compresses the largest compressible ranges.
+  - **Hard threshold** — once usage reaches `hardThreshold`, the extension auto-compresses immediately, regardless of the streak.
+
+  The auto-compressed ranges get an honest, labeled mechanical summary (the block is fully restorable via `decompress`). A successful model-driven `compress` resets the streak, and enforcement never fires below `targetPct`. Set `compress.autoCompress: false` to disable enforcement and rely on nudges alone.
+
+  As an object, each field is optional and overrides the default:
+
+  | Field | Type | Default | Meaning |
+  |-------|------|---------|---------|
+  | `enabled` | boolean | `true` | Master switch for enforcement. |
+  | `afterIgnores` | number | `3` | Consecutive ignored over-limit turns before the streak fires. |
+  | `hardThreshold` | number \| string | `0.95` (or `"95%"`) | Usage at which enforcement fires immediately. |
+  | `targetPct` | number \| string | `0.80` (or `"80%"`) | Target usage after auto-compress; ranges are picked greedily until projected usage drops below this. |
+  | `maxRanges` | number | `5` | Cap on the number of ranges compressed in a single enforcement pass. |
+
+```json
+{
+  "compress": {
+    "autoCompress": { "afterIgnores": 2, "hardThreshold": "92%" }
+  }
+}
+```
 
 ### `compress.providers` — per-provider & per-model overrides
 

@@ -124,6 +124,7 @@
 | `compress.maxContextLimit` | number \| string | `"75%"` | 🟢 ACTIVE | 触发强制压缩 nudge 的上下文阈值。 |
 | `compress.emergencyThresholdPercent` | number \| string | `"95%"` | 🟢 ACTIVE | 触发紧急截断的上下文阈值。 |
 | `compress.nudgeGrowthTokens` | number | `50000` | 🟢 ACTIVE | 软压缩 nudge 的 token 增长步长。 |
+| `compress.autoCompress` | boolean \| object | `true` | 🟢 ACTIVE | 服务端强制压缩：模型忽略 repeated over-limit nudge 时（或到达硬阈值时）自动压缩。 |
 
 **prompts 键**
 
@@ -287,6 +288,7 @@
 1. **基于增长的软 nudge**（0–75%）——由 `compress.nudgeGrowthTokens` 控制。
 2. **强制 nudge**（75–95%）——当用量越过 `compress.maxContextLimit` 时，无论增长门控如何都会触发 nudge。此阶段无损。
 3. **紧急截断**（95%+）——当用量越过 `compress.emergencyThresholdPercent` 时，截断大型工具输出以防止上下文溢出。此阶段有损。
+4. **服务端强制压缩**（`compress.autoCompress`）——若模型持续忽略 over-limit nudge，扩展会自行压缩最大的可压缩范围，不依赖模型。这是长 agentic 任务中模型从不调用 `compress` 时的兜底。
 
 ### `compress.maxContextLimit`
 
@@ -308,6 +310,35 @@
 - **默认值：** `50000`
 - **状态：** 🟢 ACTIVE
 - **说明：** 控制**软**压缩 nudge 频率的 token 增长阈值。每当积累约这么多新可压缩内容时，触发一次软 nudge。值越低模型被 nudge 压缩的频率越高；值越低频率越低。此设置只控制*基于增长的* nudge——用量越过 `compress.maxContextLimit` 后，强制 nudge 接管，不受此设置影响。映射到内核设置 `nudge.growthFloor` 和 `nudge.growthCap`。
+
+### `compress.autoCompress` —— 服务端强制压缩
+
+- **类型：** `boolean | object`
+- **默认值：** `true`
+- **状态：** 🟢 ACTIVE
+- **说明：** 模型**忽略**压缩 nudge 时的兜底。nudge 只是建议——只有模型真正调用 `compress` 才会压缩。长 agentic 任务中，模型可能连续多轮从 75% 涨到 95%+ 却从不压缩。启用后，扩展会**服务端**强制压缩，不依赖模型，分两种触发：
+  - **Streak** —— 连续 `afterIgnores` 轮 over-limit 且模型未压缩后，扩展自动压缩最大的可压缩范围。
+  - **硬阈值** —— 用量达到 `hardThreshold` 时，扩展立即自动压缩，与 streak 无关。
+
+  被自动压缩的范围会写入一份诚实的、带标签的机械摘要（块可通过 `decompress` 完整还原）。模型主动 `compress` 成功会重置 streak；用量低于 `targetPct` 时不触发。设 `compress.autoCompress: false` 可禁用强制压缩，仅依赖 nudge。
+
+  作为对象时，每个字段可选并覆盖默认值：
+
+  | 字段 | 类型 | 默认值 | 含义 |
+  |------|------|--------|------|
+  | `enabled` | boolean | `true` | 强制压缩的总开关。 |
+  | `afterIgnores` | number | `3` | streak 触发前连续忽略 over-limit 的轮数。 |
+  | `hardThreshold` | number \| string | `0.95`（或 `"95%"`） | 立即触发的用量阈值。 |
+  | `targetPct` | number \| string | `0.80`（或 `"80%"`） | 自动压缩后的目标用量；贪心选范围直到 projected usage 低于此值。 |
+  | `maxRanges` | number | `5` | 单次强制压缩最多压缩的范围数。 |
+
+```json
+{
+  "compress": {
+    "autoCompress": { "afterIgnores": 2, "hardThreshold": "92%" }
+  }
+}
+```
 
 ### `compress.providers` —— 按 provider / 按 model 覆盖
 

@@ -39,6 +39,7 @@ import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { maybeAutoCompress, resolveAutoCompress } from "./auto-compress.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -135,6 +136,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking();
+    runtime.autoCompressFor(ctx.sessionManager.getSessionId()).reset();
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
@@ -176,6 +178,7 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
+    runtime.autoCompressDrop(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -277,8 +280,34 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         activeBefore: state.blocks.filter((b) => b.active).length,
       });
 
-      const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
+      // turnKey + compress outcomes are computed BEFORE processTurn (not just
+      // before the nudge block) so the auto-compress enforcement below can read
+      // the current turn's compress outcomes — a successful model compress resets
+      // the ignored-nudge streak. Compress-outcome tracking feeds ONLY the nudge
+      // circuit breaker further down: failed/no-op attempts are counted (capped at
+      // MAX_COMPRESS_ATTEMPTS per user turn) to stop re-injecting the nudge at a
+      // model that keeps failing compress. The failed toolResult itself already
+      // persists in the session log with the full error text — the model sees it
+      // and can self-correct — so NO transient retry prompt is injected (transient
+      // re-injection per LLM call caused the #223 infinite-append loop). Only
+      // outcomes from the CURRENT user turn are considered; noteCompressOutcomes
+      // is idempotent per toolCallId and only needs `entries`, so computing it
+      // before processTurn is safe.
+      const turnKey = lastUserMessageId(entries) ?? sid;
+      const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
+      const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
+
+      let turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
+
+      // Server-side enforcement (issue #269): when the model keeps ignoring
+      // over-limit nudges (or usage hits the hard threshold), auto-compress the
+      // largest compressible ranges ourselves so context stays bounded.
+      const acSettings = resolveAutoCompress(runtime.adapter.compress);
+      if (acSettings.enabled) {
+        const ac = await maybeAutoCompress({ runtime, ctx, config, coreMessages, turn, tokenCount, turnKey, sid, settings: acSettings, compressOutcomes });
+        if (ac) turn = ac.turn;
+      }
 
       logInfo("turn", {
         sid,
@@ -313,21 +342,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
     const originalById = collectOriginals(entries);
     const rebuilt = coreOutToAgentMessages(turn.messages, originalById);
     const debugOn = debug.enabled;
-
-    const turnKey = lastUserMessageId(entries) ?? sid;
-
-    // Compress-outcome tracking feeds ONLY the nudge circuit breaker below:
-    // failed/no-op attempts are counted (capped at MAX_COMPRESS_ATTEMPTS per
-    // user turn) to stop re-injecting the nudge at a model that keeps failing
-    // compress. The failed toolResult itself already persists in the session
-    // log with the full error text — the model sees it and can self-correct —
-    // so NO transient retry prompt is injected (transient re-injection per
-    // LLM call caused the #223 infinite-append loop). Only outcomes from the
-    // CURRENT user turn are considered; processed BEFORE the nudge block so
-    // the cap suppression sees the newest outcome (a success on this fire
-    // must lift the cap on this same fire).
-    const compressOutcomes = collectCompressOutcomes(entries, turnStartIndex(entries));
-    const outcome = compressOutcomes.length > 0 ? runtime.noteCompressOutcomes(turnKey, compressOutcomes) : null;
 
     if (turn.nudge?.shouldInject) {
       // Two independent channels for the nudge:

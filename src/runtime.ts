@@ -16,6 +16,7 @@ import { ThrottleEpisode } from "./throttle-retry.js";
 import { logInfo, logWarn, setDebugEnabled } from "./log.js";
 import { findUniqueLongestRun, type MatchRange } from "./sequence-match.js";
 import { OverflowEpisode } from "./overflow-selfheal.js";
+import { AutoCompressEpisode } from "./auto-compress.js";
 // pi exposes `sessionManager.buildContextEntries()`; omp (oh-my-pi) only has
 // `getBranch()`. Both return chronological SessionEntry[]; feature-detect so
 // the adapter runs under either host (omp's runner silently swallows the TypeError).
@@ -90,6 +91,14 @@ export interface AcpRuntime {
    *  the map entry so a long-lived process cycling through many sessions
    *  doesn't accumulate them. */
   overflowDrop(sid: string): void;
+  /** Per-session auto-compress enforcement episode (ignored-nudge streak +
+   *  last auto-compressed turnKey), keyed by session id so concurrent sessions
+   *  cannot share an episode. Reset on session_start. */
+  autoCompressFor(sid: string): AutoCompressEpisode;
+  /** Drop a session's auto-compress episode entirely (session_shutdown):
+   *  releases the map entry so a long-lived process cycling through many
+   *  sessions doesn't accumulate them. */
+  autoCompressDrop(sid: string): void;
   /** Record a compress call whose every requested range is dead (refs stale or
    *  unknown — the kernel cannot create a block from it no matter what summary
    *  is written). Returns the failure count for this exact range fingerprint
@@ -263,6 +272,16 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     overflowEpisodes.delete(sid);
   }
 
+  const autoCompressEpisodes = new Map<string, AutoCompressEpisode>();
+  function autoCompressFor(sid: string): AutoCompressEpisode {
+    let ep = autoCompressEpisodes.get(sid);
+    if (!ep) { ep = new AutoCompressEpisode(); autoCompressEpisodes.set(sid, ep); }
+    return ep;
+  }
+  function autoCompressDrop(sid: string): void {
+    autoCompressEpisodes.delete(sid);
+  }
+
   const deadCompressCounts = new Map<string, Map<string, number>>();
   function noteDeadCompress(sid: string, fingerprint: string): number {
     let per = deadCompressCounts.get(sid);
@@ -405,4 +424,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop, autoCompressFor, autoCompressDrop };}
