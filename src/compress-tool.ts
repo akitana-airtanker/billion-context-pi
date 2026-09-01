@@ -5,9 +5,10 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
-import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, type CompressionBlock, type CompressParseDiagnostics } from "acp-kernel";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId } from "./tokens.js";
+import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
@@ -121,6 +122,87 @@ export function isCompressNoopText(text: string): boolean {
   return compressPanelBlocks(text) === 0;
 }
 
+// Issue #250 loop breaker: small models repeat an identical compress call with
+// refs that can NEVER resolve (stale/consumed/unknown) — the kernel rejects
+// every time and the model just retries the same dead refs for minutes. A
+// range is "dead" when the kernel's boundary resolver will reject it no matter
+// what summary is written, so repeating the same dead range set is guaranteed
+// to fail. After DEAD_REPEAT_REJECT identical failures we stop running the
+// kernel and return a hard rejection that lists the LIVE compressible ranges
+// (from the nudge decision already computed in this call), so the model gets
+// usable refs without having to call acp_status.
+const DEAD_REPEAT_REJECT = 2;
+
+function paddedRef(n: number): string {
+  return `m${String(n).padStart(5, "0")}`;
+}
+
+function blockHasVisibleAnchor(block: CompressionBlock, visibleIds: Set<string>): boolean {
+  if (visibleIds.has(`acp_summary_${block.blockId}`)) return true;
+  return block.effectiveMessageIds.some((id) => visibleIds.has(id));
+}
+
+function hasActiveOwner(state: CompressionState, ownedIds: string[], visibleIds: Set<string>): boolean {
+  const owned = new Set(ownedIds);
+  for (const block of state.blocks) {
+    if (!block.active) continue;
+    const inheritsOwned = block.directBlockIds.some((childId) => {
+      const child = state.blocks.find((c) => c.blockId === childId);
+      return child !== undefined && child.effectiveMessageIds.some((id) => owned.has(id));
+    });
+    if (inheritsOwned && blockHasVisibleAnchor(block, visibleIds)) return true;
+  }
+  return false;
+}
+
+function refIsDead(ref: string, state: CompressionState, visibleIds: Set<string>): boolean {
+  const trimmed = ref.trim();
+  if (/^b\d+$/i.test(trimmed)) {
+    const block = state.blocks.find((b) => b.blockId.toLowerCase() === trimmed.toLowerCase());
+    if (!block) return true;
+    if (block.active && blockHasVisibleAnchor(block, visibleIds)) return false;
+    return !hasActiveOwner(state, block.effectiveMessageIds, visibleIds);
+  }
+  const m = trimmed.match(/^m(\d+)$/i);
+  if (!m) return true;
+  const rawId = state.messageRefs.byRef[trimmed] ?? state.messageRefs.byRef[paddedRef(Number(m[1]))];
+  if (!rawId) return true;
+  if (visibleIds.has(rawId)) return false;
+  return !hasActiveOwner(state, [rawId], visibleIds);
+}
+
+function compressibleSnapshotText(nudge: NudgeDecision | undefined): string {
+  const ranges = viableRanges(nudge?.compressibleRanges ?? []);
+  if (ranges.length === 0) {
+    return "No compressible ranges remain — the context is already at its minimum; continue the task without compressing.";
+  }
+  return formatRanges(ranges, []);
+}
+
+function deadRepeatRejectionText(spans: string[], count: number, snapshot: string): string {
+  return [
+    "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
+    `[ACP] REJECTED — this exact compress call has now failed ${count}× (ranges ${spans.join(", ")}). Those refs are stale: they point at content already compressed into an active block, or at refs that no longer exist. Repeating this call cannot succeed — do not retry it.`,
+    "",
+    "Current compressible ranges (use these refs exactly as listed):",
+    snapshot,
+    "",
+    "If none of these fit, call acp_status for the full picture — or continue the task without compressing.",
+  ].join("\n");
+}
+
+function cappedRejectionText(snapshot: string): string {
+  return [
+    "▣ ACP | 0 → 0 tokens (~0 reclaimed, 0 blocks)",
+    `[ACP] PAUSED — ${MAX_COMPRESS_ATTEMPTS} compress attempts already failed this turn; further compress calls are rejected until the next user message.`,
+    "",
+    "Current compressible ranges (use these refs exactly as listed):",
+    snapshot,
+    "",
+    "Continue the task; compress becomes available again on the next user message.",
+  ].join("\n");
+}
+
 function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionBlock[]): string[] | null {
   if (newBlocks.length === 0) return null;
   const byId = new Map(allBlocks.map((b) => [b.blockId, b]));
@@ -166,6 +248,18 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   });
   const state = turn.state;
   const messages = turn.messages;
+  const sid = ctx.sessionManager.getSessionId();
+  const turnKey = lastUserMessageId(entries) ?? sid;
+  const snapshot = compressibleSnapshotText(turn.nudge);
+  if (runtime.compressRetryCappedFor(turnKey)) {
+    logWarn("compress", { sid, event: "capped-reject", turnKey });
+    return cappedRejectionText(snapshot);
+  }
+  const visibleIds = new Set(messages.map((m) => m.id));
+  const deadSpans = ranges
+    .filter((r) => refIsDead(r.startId, state, visibleIds) || refIsDead(r.endId, state, visibleIds))
+    .map((r) => `${r.startId}..${r.endId}`);
+  const allDead = deadSpans.length === ranges.length;
   // beforeTokens on the same CJK-aware scale as the kernel's countTokens, so
   // "X → Y (~Z reclaimed)" compares like-for-like.
   const beforeTokens = estimateTokens(messages, collectCoveredMessageIds(state), imageTokens);
@@ -205,6 +299,15 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
   }
   await runtime.save(applied.state, ctx);
   const { blocksCreated, tokensCompressed, errors, warnings } = applied.result;
+  if (blocksCreated > 0) {
+    runtime.clearDeadCompress(sid);
+  } else if (allDead) {
+    const count = runtime.noteDeadCompress(sid, ranges.map((r) => `${r.startId}..${r.endId}`).join("|"));
+    if (count >= DEAD_REPEAT_REJECT) {
+      logWarn("compress", { sid, event: "dead-range-reject", count, spans: deadSpans });
+      return deadRepeatRejectionText(deadSpans, count, snapshot);
+    }
+  }
 
   // Re-measure the post-compression sent view on the SAME scale as beforeTokens
   // (post-processTurn view: visible text + every active block's summary anchor

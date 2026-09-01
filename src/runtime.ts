@@ -90,6 +90,15 @@ export interface AcpRuntime {
    *  the map entry so a long-lived process cycling through many sessions
    *  doesn't accumulate them. */
   overflowDrop(sid: string): void;
+  /** Record a compress call whose every requested range is dead (refs stale or
+   *  unknown — the kernel cannot create a block from it no matter what summary
+   *  is written). Returns the failure count for this exact range fingerprint
+   *  in this session (issue #250 loop breaker). */
+  noteDeadCompress(sid: string, fingerprint: string): number;
+  /** Drop a session's dead-range repeat tracking (a successful compress
+   *  renumbers refs so old fingerprints are meaningless; session_shutdown for
+   *  memory hygiene). */
+  clearDeadCompress(sid: string): void;
 }
 // omp fires the context event before the current user message is persisted to
 // the session branch, so merge event.messages (exact messages about to be sent,
@@ -254,6 +263,18 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
     overflowEpisodes.delete(sid);
   }
 
+  const deadCompressCounts = new Map<string, Map<string, number>>();
+  function noteDeadCompress(sid: string, fingerprint: string): number {
+    let per = deadCompressCounts.get(sid);
+    if (!per) { per = new Map(); deadCompressCounts.set(sid, per); }
+    const count = (per.get(fingerprint) ?? 0) + 1;
+    per.set(fingerprint, count);
+    return count;
+  }
+  function clearDeadCompress(sid: string): void {
+    deadCompressCounts.delete(sid);
+  }
+
   const throttleEpisodes = new Map<string, ThrottleEpisode>();
   function throttleFor(sid: string): ThrottleEpisode {
     let ep = throttleEpisodes.get(sid);
@@ -384,4 +405,4 @@ export function createRuntime(adapter: AdapterConfig): AcpRuntime {
   }
 
   let refused = false;
-  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, throttleFor, throttleDrop };}
+  return { core, store, get refused() { return refused; }, set refused(v: boolean) { refused = v; }, get adapter() { return adapterRef; }, setAdapter: (a) => { adapterRef = a; }, get prompts() { return promptsRef; }, setPrompts: (p) => { promptsRef = p; }, markNudgeShown: (k) => { nudgeShownTurns.add(k); }, nudgeShownFor: (k) => nudgeShownTurns.has(k), clearNudgeTracking: () => { nudgeShownTurns.clear(); }, noteCompressOutcomes, compressRetryCappedFor, clearCompressRetryTracking, liveContextLimit, configFor, reloadConfig, stateFor, save, acquireLock, overflowFor, overflowDrop, noteDeadCompress, clearDeadCompress, throttleFor, throttleDrop };}
