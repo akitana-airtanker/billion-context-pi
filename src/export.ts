@@ -1,7 +1,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
-import { prune, defaultCountTokens, type CoreMessage, type CompressionState } from "acp-kernel";
+import { renderHandoff, matchSession, defaultCountTokens, type CompressionState } from "acp-kernel";
 import { SessionManager, type SessionEntry } from "@earendil-works/pi-coding-agent";
 import { entriesToCoreMessages, extractText } from "./messages.js";
 import { SessionStateStore } from "./state.js";
@@ -100,70 +100,6 @@ export async function listSessions(sessionDir: string): Promise<SessionSummary[]
   }));
 }
 
-function renderHandoff(s: LoadedSession, full: boolean): string {
-  const lines: string[] = [];
-  lines.push("# billion-context session handoff");
-  lines.push("");
-  lines.push(`- title: ${s.title ? truncate(s.title, 200) : "(untitled)"}`);
-  if (s.name) lines.push(`- label: ${s.name}`);
-  lines.push(`- session id: ${s.id}`);
-  lines.push(`- messages: ${s.entries.length}`);
-  if (s.contextTokens) lines.push(`- last context tokens: ~${s.contextTokens}`);
-  lines.push(`- compression blocks: ${s.state.blocks.length} (active ${s.state.blocks.filter((b) => b.active).length})`);
-  lines.push("");
-
-  // prune injects block summaries in place of compressed ranges by default.
-  const coreMessages = entriesToCoreMessages(s.entries);
-  const view = full ? coreMessages : prune(coreMessages, s.state);
-  lines.push(full
-    ? `## Full conversation (${coreMessages.length} messages)`
-    : `## Conversation (folded view as the model saw it, ${view.length} client messages)`);
-  lines.push("");
-  if (view.length === 0) {
-    lines.push("No conversation messages to export.");
-    lines.push("");
-  }
-  let lastRole = "";
-  for (const m of view) {
-    if (m.role !== lastRole) {
-      lines.push(`### ${m.role}`);
-      lines.push("");
-      lastRole = m.role;
-    }
-    lines.push(renderMessage(m));
-  }
-  lines.push("");
-  return lines.join("\n");
-}
-
-function renderMessage(m: CoreMessage): string {
-  const parts: string[] = [];
-  switch (m.contentType) {
-    case "text":
-      parts.push(m.text ?? "");
-      break;
-    case "tool-call":
-      parts.push(`\`${m.toolName ?? "?"}(${m.toolCallId ?? ""})\` args: ${m.text ?? ""}`);
-      break;
-    case "tool-result":
-      parts.push(`\`${m.toolName ?? "?"}(${m.toolCallId ?? ""})\` → ${m.text ?? ""}`);
-      break;
-    case "reasoning":
-      parts.push(`_reasoning_: ${m.text ?? ""}`);
-      break;
-  }
-  const body = parts.join("\n").trim();
-  return body === "" ? "_(empty)_" : body + "\n";
-}
-
-function matchSession(sessions: LoadedSession[], selector: string): LoadedSession[] {
-  const exact = sessions.filter((s) => s.id === selector);
-  if (exact.length > 0) return exact;
-  const byLabel = sessions.filter((s) => s.name === selector);
-  if (byLabel.length > 0) return byLabel;
-  return sessions.filter((s) => s.id.startsWith(selector) || (s.name ?? "").startsWith(selector));
-}
-
 export async function exportSession(selector: string | undefined, opts: ExportOptions, sessionDir: string): Promise<string> {
   const all = await loadAllSessions(sessionDir);
   if (all.length === 0) {
@@ -175,7 +111,7 @@ export async function exportSession(selector: string | undefined, opts: ExportOp
     );
     return ["ACP-managed sessions:", "", ...rows.map((r) => `  ${r}`), "", "Usage: /acp-export <session-id|label> [--output handoff.md] [--full]"].join("\n");
   }
-  const matches = matchSession(all, selector);
+  const matches = matchSession(all, selector, (s) => s.name);
   if (matches.length === 0) {
     throw new Error(`no session matches "${selector}" (run "/acp-export" to list sessions)`);
   }
@@ -183,7 +119,19 @@ export async function exportSession(selector: string | undefined, opts: ExportOp
     const ids = matches.map((s) => s.id).join(", ");
     throw new Error(`selector "${selector}" matches ${matches.length} sessions (${ids}); use the full session id`);
   }
-  const markdown = renderHandoff(matches[0]!, opts.full ?? false);
+  const s = matches[0]!;
+  const markdown = renderHandoff({
+    coreMessages: entriesToCoreMessages(s.entries),
+    state: s.state,
+    full: opts.full ?? false,
+    meta: {
+      title: s.title ? truncate(s.title, 200) : undefined,
+      label: s.name,
+      sessionId: s.id,
+      contextTokens: s.contextTokens || undefined,
+      extraBullets: [`- messages: ${s.entries.length}`],
+    },
+  });
   if (opts.output) {
     mkdirSync(path.dirname(path.resolve(opts.output)), { recursive: true });
     writeFileSync(opts.output, markdown, "utf8");
