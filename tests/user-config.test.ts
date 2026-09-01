@@ -166,6 +166,32 @@ test("applyUserConfig preserves protected adapter fields", () => {
   assert.equal(result.preserveRecentMessages, 5000, "preserveRecentMessages preserved");
 });
 
+test("applyUserConfig preserves adapter compression-model routing when user tuning omits it", () => {
+  const adapter: AdapterConfig = {
+    compress: {
+      compressionModel: { provider: "openai-codex", model: "gpt-5.6-luna", thinkingLevel: "xhigh" },
+      nudgeGrowthTokens: 75_000,
+    },
+  };
+  const result = applyUserConfig(adapter, {
+    compress: { maxContextLimit: 0.65, emergencyThresholdPercent: 0.75, nudgeGrowthTokens: 75_000 },
+  });
+  assert.deepEqual(result.compress?.compressionModel, adapter.compress?.compressionModel);
+  assert.equal(result.compress?.maxContextLimit, 0.65);
+});
+
+test("applyUserConfig allows user compression-model routing to override adapter routing", () => {
+  const result = applyUserConfig(
+    { compress: { compressionModel: { provider: "openai-codex", model: "gpt-5.6-luna" } } },
+    { compress: { compressionModel: { provider: "openai", model: "gpt-5.6-luna", thinkingLevel: "high" } } },
+  );
+  assert.deepEqual(result.compress?.compressionModel, {
+    provider: "openai",
+    model: "gpt-5.6-luna",
+    thinkingLevel: "high",
+  });
+});
+
 test("applyUserConfig with empty user config returns adapter unchanged", () => {
   const adapter: AdapterConfig = {
     modelContextLimit: 200_000,

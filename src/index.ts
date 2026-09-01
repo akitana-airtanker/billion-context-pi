@@ -39,12 +39,23 @@ import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
 import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
+import { createDefaultModelRuntimeInvoker, type CompressionModelInvoker } from "./compression-model.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
 declare const CURRENT_VERSION: string;
 
-export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactory {
+export interface AcpExtensionOptions {
+  /** Test/integration seam for the optional external compression model. */
+  compressionModelInvoker?: CompressionModelInvoker;
+}
+
+export function createAcpExtension(
+  adapter: AdapterConfig = {},
+  options: AcpExtensionOptions = {},
+): ExtensionFactory {
+  const compressionModelInvoker = options.compressionModelInvoker ?? createDefaultModelRuntimeInvoker();
+
   return (pi: ExtensionAPI) => {
     if (process.env.BILLION_CONTEXT_PROXY) {
       console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
@@ -62,7 +73,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     wireToolGuardrails(pi, runtime);
     wireOverflowSelfHeal(pi, runtime);
     wireThrottleRetry(pi, runtime);
-    pi.registerTool(makeCompressTool(runtime));
+    pi.registerTool(makeCompressTool(runtime, compressionModelInvoker));
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));

@@ -36,6 +36,19 @@ export interface CompressSettings {
 
 /** Per-provider compression overrides. Carries the same tuning fields as the
  *  global level, plus an optional per-model map keyed by model id. */
+export type CompressionThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/** Model used to produce ACP compression summaries. Omitted to keep the
+ * active-model-only behavior. */
+export interface CompressionModelConfig {
+  /** Pi provider id, e.g. "openai-codex". */
+  provider: string;
+  /** Provider model id, e.g. "gpt-5.6-luna". */
+  model: string;
+  /** Reasoning effort passed to the summarizer. Defaults to xhigh. */
+  thinkingLevel?: CompressionThinkingLevel;
+}
+
 export interface ProviderCompress extends CompressSettings {
   /** Per-model overrides within this provider, keyed by model id
    *  (e.g. "claude-sonnet-4-5"). */
@@ -47,6 +60,10 @@ export interface ProviderCompress extends CompressSettings {
  *  entry is resolved live each turn from the current model
  *  (`ctx.model.provider` / `ctx.model.id`). */
 export interface CompressConfig extends CompressSettings {
+  /** Optional separate model for writing summaries. When configured, the
+   * selected original messages are sent to this model; compression falls back
+   * to the active model's supplied summary when it is unavailable or fails. */
+  compressionModel?: CompressionModelConfig;
   /** Per-provider (and per-model) overrides, keyed by Pi provider name
    *  (e.g. "anthropic", "openai", "zhipu") — the same name used in
    *  models.json and `pi --provider`. */
@@ -159,6 +176,16 @@ export function mergeCompress(
  *  Returns a CompressSettings whose fields are undefined when nothing is set
  *  at any level. The Pi adapter keys providers by name (ctx.model.provider),
  *  not URL — it never sees the upstream URL the way the proxy does. */
+export function resolveCompressionModel(adapter: AdapterConfig): CompressionModelConfig | undefined {
+  const configured = adapter.compress?.compressionModel;
+  if (!configured || !configured.provider || !configured.model) return undefined;
+  return {
+    provider: configured.provider,
+    model: configured.model,
+    thinkingLevel: configured.thinkingLevel ?? "xhigh",
+  };
+}
+
 export function resolveCompress(
   compress: CompressConfig | undefined,
   provider: string | undefined,

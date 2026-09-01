@@ -5,10 +5,12 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { resolveCompressionModel } from "./config.js";
+import { selectCompressionMessages, type CompressionModelInvoker } from "./compression-model.js";
 import { MAX_COMPRESS_ATTEMPTS } from "./runtime.js";
 import { debug, logError, logInfo, logThrow, logWarn } from "./log.js";
 import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages, lastUserMessageId } from "./tokens.js";
-import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision } from "acp-kernel";
+import { defaultCountTokens, parseCompressArgs, viableRanges, formatRanges, type CompressionBlock, type CompressionState, type CompressParseDiagnostics, type NudgeDecision, type CoreMessage } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
 import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
@@ -40,7 +42,7 @@ const CompressParams = Type.Object({
 
 type CompressArgs = Static<typeof CompressParams>;
 
-export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof CompressParams> {
+export function makeCompressTool(runtime: AcpRuntime, compressionModelInvoker?: CompressionModelInvoker): ToolDefinition<typeof CompressParams> {
   return {
     name: "compress",
     label: "Compress",
@@ -58,7 +60,7 @@ export function makeCompressTool(runtime: AcpRuntime): ToolDefinition<typeof Com
       if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
-        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId);
+        result = await handleCompress(params as CompressArgs, runtime, ctx, toolCallId, compressionModelInvoker);
       } catch (e) {
         logThrow("compress", e, { sid: ctx.sessionManager.getSessionId(), ranges: typeof (params as CompressArgs).content === "string" ? "string" : ((params as CompressArgs).content?.length ?? 0) });
         throw e;
@@ -272,7 +274,60 @@ function tier3OnlyRewrite(newBlocks: CompressionBlock[], allBlocks: CompressionB
   return spans;
 }
 
-async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: ExtensionContext, toolCallId?: string): Promise<string> {
+function coreRefForExternalSelection(ref: string, state: CompressionState): string {
+  const trimmed = ref.trim();
+  const mapped = state.messageRefs.byRef[trimmed];
+  if (mapped !== undefined) return mapped;
+  const match = trimmed.match(/^m(\d+)$/i);
+  return match === null ? ref : state.messageRefs.byRef[paddedRef(Number(match[1]))] ?? ref;
+}
+
+async function summariesFromExternalModel(
+  ranges: readonly RangeEntry[],
+  messages: readonly CoreMessage[],
+  invoker: CompressionModelInvoker,
+  config: NonNullable<ReturnType<typeof resolveCompressionModel>>,
+  topLevelTopic: string | undefined,
+  signal: AbortSignal | undefined,
+): Promise<string[]> {
+  const summaries: string[] = [];
+  for (const range of ranges) {
+    const selected = selectCompressionMessages(messages, [range]);
+    if (selected.length === 0) {
+      summaries.push(range.summary);
+      continue;
+    }
+    try {
+      const summary = await invoker.summarize({
+        messages: selected,
+        topic: range.topic ?? topLevelTopic,
+        config,
+        signal,
+      });
+      if (summary?.trim()) {
+        summaries.push(summary.trim());
+        continue;
+      }
+      logWarn("compress", { event: "external-summary-fallback", reason: "empty-response" });
+    } catch (error) {
+      logWarn("compress", { event: "external-summary-fallback", reason: errorName(error) });
+    }
+    summaries.push(range.summary);
+  }
+  return summaries;
+}
+
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : "unknown-error";
+}
+
+async function handleCompress(
+  args: CompressArgs,
+  runtime: AcpRuntime,
+  ctx: ExtensionContext,
+  toolCallId?: string,
+  compressionModelInvoker?: CompressionModelInvoker,
+): Promise<string> {
   const maybeRanges = normalizeRanges(args);
   // Argument errors throw (not return): pi-agent-core only sets isError:true
   // on THROWN tool errors, and the failure counter keys off isError. A
@@ -305,7 +360,9 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     logWarn("compress", { sid, event: "capped-reject", turnKey });
     return cappedRejectionText(snapshot);
   }
-  const visibleIds = new Set(messages.map((m) => m.id));
+  // Core messages use stable session-entry ids (e.g. e1), while model-facing
+  // ACP refs use mNNNNN ids. Keep both forms visible for dead-range checks.
+  const visibleIds = new Set(messages.flatMap((m) => [m.id, state.messageRefs.byRaw[m.id] ?? m.id]));
   const deadSpans = ranges
     .filter((r) => refIsDead(r.startId, state, visibleIds) || refIsDead(r.endId, state, visibleIds))
     .map((r) => `${r.startId}..${r.endId}`);
@@ -320,14 +377,23 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     sid: ctx.sessionManager.getSessionId(),
     modelId,
     ranges: ranges.length,
-    spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, summary: r.summary, topic: r.topic ?? topLevelTopic ?? null })),
+    spans: ranges.map((r) => ({ span: `${r.startId}..${r.endId}`, summaryLen: r.summary.length, topic: r.topic ?? topLevelTopic ?? null })),
     blocksBefore: state.blocks.length,
     activeBefore: state.blocks.filter((b) => b.active).length,
     beforeMsgCount: messages.length,
     beforeTokens,
   });
+  const compressionModel = resolveCompressionModel(runtime.adapter);
+  const externalRanges = ranges.map((range) => ({
+    ...range,
+    startId: coreRefForExternalSelection(range.startId, state),
+    endId: coreRefForExternalSelection(range.endId, state),
+  }));
+  const summaries = compressionModelInvoker && compressionModel && !allDead
+    ? await summariesFromExternalModel(externalRanges, coreMessages, compressionModelInvoker, compressionModel, topLevelTopic, ctx.signal)
+    : ranges.map((range) => range.summary);
   const applied = runtime.core.applyCompression({
-    ranges: ranges.map((r) => ({ startRef: r.startId, endRef: r.endId, summary: r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
+    ranges: ranges.map((r, index) => ({ startRef: r.startId, endRef: r.endId, summary: summaries[index] ?? r.summary, topic: r.topic ?? topLevelTopic, summaryMaxChars, compressCallId: toolCallId })),
     messages,
     state,
     config,
@@ -384,7 +450,7 @@ async function handleCompress(args: CompressArgs, runtime: AcpRuntime, ctx: Exte
     errorDetails: errors.slice(0, 3),
     blocksAfter: applied.state.blocks.length,
     activeAfter: applied.state.blocks.filter((b) => b.active).length,
-    newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length, summary: b.summary })),
+    newBlocks: newBlocks.map((b) => ({ blockId: b.blockId, tier: b.tier, summaryLen: b.summary.length, directMsgCount: b.directMessageIds.length, effectiveMsgCount: b.effectiveMessageIds.length })),
   });
 
   logInfo("compress", {

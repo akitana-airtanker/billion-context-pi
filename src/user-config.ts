@@ -71,9 +71,18 @@ function pickKnown(parsed: Record<string, unknown>): UserAcpConfig {
 /** Merge user config onto an adapter config: user config wins for the keys it
  *  sets. Used at session_start to apply runtime-discovered config. */
 export function applyUserConfig(adapter: AdapterConfig, user: UserAcpConfig): AdapterConfig {
+  const compress = adapter.compress || user.compress
+    ? {
+        ...adapter.compress,
+        ...user.compress,
+        providers: user.compress?.providers ?? adapter.compress?.providers,
+        compressionModel: user.compress?.compressionModel ?? adapter.compress?.compressionModel,
+      }
+    : undefined;
   return {
     ...adapter,
     ...user,
+    compress,
     coreOverrides: adapter.coreOverrides,
     protectedTools: adapter.protectedTools,
     preserveRecentMessages: adapter.preserveRecentMessages,

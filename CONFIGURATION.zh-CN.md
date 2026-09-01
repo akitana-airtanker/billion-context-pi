@@ -338,6 +338,27 @@ provider 的 key 是 **Pi provider 名**(如 `"anthropic"`、`"openai"`、`"zhip
 
 在 `anthropic` / `claude-sonnet-4-5` 下,生效阈值变为 `maxContextLimit=70%`、`nudgeGrowthTokens=30000`、`emergencyThresholdPercent=95%`(继承自全局)。
 
+### `compress.compressionModel`
+
+- **类型：** object `{ provider: string, model: string, thinkingLevel?: string }`
+- **默认值：** 未设置——由当前 Pi 模型直接编写摘要
+- **状态：** 🟢 ACTIVE
+- **说明：** 可选的独立 Pi 模型，用于编写 ACP 摘要。`provider` 是 Pi provider id，`model` 是其 model id。`thinkingLevel` 可取 `minimal`、`low`、`medium`、`high`、`xhigh` 或 `max`，默认值为 `xhigh`。如果配置的模型不可用或调用失败，压缩会回退到当前模型提供的摘要。
+
+例如，为所有 ACP 摘要使用 GPT-5.6 Luna：
+
+```json
+{
+  "compress": {
+    "compressionModel": {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "xhigh"
+    }
+  }
+}
+```
+
 ---
 
 ## 提示词自定义

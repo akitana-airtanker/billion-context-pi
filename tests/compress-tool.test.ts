@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { rm } from "node:fs/promises";
+import { readFile, rm } from "node:fs/promises";
 import { createAcpExtension } from "../src/index.js";
 
 // ─── helpers (mirror decompress-tool.test.ts) ──────────────────────────────
@@ -28,6 +28,7 @@ function userMsg(id: string, text: string) {
 function fakeCtx(entries: any[], stateFile: string) {
   let usage: { tokens: number; percent: number } | null = null;
   return {
+    cwd: "/Users/akira.tanaka/tmp/billion-context-pi",
     mode: "rpc",
     hasUI: false,
     ui: { notify: () => {}, confirm: async () => true, select: async () => undefined, input: async () => "", setStatus: () => {} },
@@ -44,6 +45,9 @@ function fakeCtx(entries: any[], stateFile: string) {
 
 const ZH = "中".repeat(300);   // 300 CJK tokens
 const ZH2 = "中".repeat(150);  // 150 CJK tokens
+const LONG_ORIGINAL = "original message\n".repeat(400);
+const EXTERNAL_SUMMARY = "external summary ".repeat(5).trim();
+const ACTIVE_SUMMARY = "active summary ".repeat(5);
 
 function beforeTokensFrom(out: string): number {
   // Panel renders ≥1000 compactly ("1.0K") — normalize to tokens.
@@ -58,6 +62,77 @@ async function runContextRound(handlers: Map<string, any[]>, ctx: any) {
 }
 
 // ─── tests ─────────────────────────────────────────────────────────────────
+
+test("configured compression model receives original messages and supplies the block summary", async () => {
+  const { api, handlers } = captureApi();
+  const calls: any[] = [];
+  createAcpExtension(
+    {
+      modelContextLimit: 200_000,
+      coreOverrides: { preserveRecentTokens: 0 },
+      compress: { compressionModel: { provider: "openai-codex", model: "gpt-5.6-luna" } },
+    },
+    {
+      compressionModelInvoker: {
+        async summarize(request) {
+          calls.push(request);
+          return EXTERNAL_SUMMARY;
+        },
+      },
+    },
+  )(api as any);
+  const stateFile = "/tmp/pai-acp-compress-external.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const entries = [
+    userMsg("e1", LONG_ORIGINAL),
+    ...Array.from({ length: 9 }, (_, i) => userMsg(`e${i + 2}`, `recent ${i + 2}`)),
+  ];
+  const ctx = fakeCtx(entries, stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  await compressTool.execute(
+    "tc-external",
+    { content: [{ startId: "m00001", endId: "m00001", summary: ACTIVE_SUMMARY, topic: "topic" }] },
+    undefined, undefined, ctx,
+  );
+
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].topic, "topic");
+  assert.equal(calls[0].messages[0].text, LONG_ORIGINAL);
+  const persisted = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(persisted.blocks[0].summary, EXTERNAL_SUMMARY);
+});
+
+test("compression model failures fall back to the active model summary", async () => {
+  const { api, handlers } = captureApi();
+  createAcpExtension(
+    {
+      modelContextLimit: 200_000,
+      coreOverrides: { preserveRecentTokens: 0 },
+      compress: { compressionModel: { provider: "openai-codex", model: "gpt-5.6-luna" } },
+    },
+    { compressionModelInvoker: { summarize: async () => { throw new Error("provider unavailable"); } } },
+  )(api as any);
+  const stateFile = "/tmp/pai-acp-compress-external-fallback.session.json";
+  await rm(`${stateFile}.acp.json`, { force: true });
+  const ctx = fakeCtx([
+    userMsg("e1", LONG_ORIGINAL),
+    ...Array.from({ length: 9 }, (_, i) => userMsg(`e${i + 2}`, `recent ${i + 2}`)),
+  ], stateFile);
+  ctx.__setUsage(100_000);
+  await runContextRound(handlers, ctx);
+  const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+  await compressTool.execute(
+    "tc-fallback",
+    { content: [{ startId: "m00001", endId: "m00001", summary: ACTIVE_SUMMARY }] },
+    undefined, undefined, ctx,
+  );
+
+  const persisted = JSON.parse(await readFile(`${stateFile}.acp.json`, "utf8"));
+  assert.equal(persisted.blocks[0].summary, ACTIVE_SUMMARY);
+});
 
 test("compress beforeTokens is the raw CJK-aware estimate", async () => {
   const { api, handlers } = captureApi();

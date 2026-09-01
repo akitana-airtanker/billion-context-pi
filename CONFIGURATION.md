@@ -346,6 +346,27 @@ The provider key is the **Pi provider name** (e.g. `"anthropic"`, `"openai"`, `"
 
 On `anthropic` / `claude-sonnet-4-5` the effective thresholds become `maxContextLimit=70%`, `nudgeGrowthTokens=30000`, and `emergencyThresholdPercent=95%` (inherited from global).
 
+### `compress.compressionModel`
+
+- **Type:** object `{ provider: string, model: string, thinkingLevel?: string }`
+- **Default:** unset — the active Pi model writes summaries directly
+- **Status:** 🟢 ACTIVE
+- **Description:** Optional separate Pi model used to write ACP summaries. `provider` is the Pi provider id and `model` is its model id. `thinkingLevel` accepts `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`; it defaults to `xhigh`. If the configured model is unavailable or fails, compression falls back to the active model's summary.
+
+For example, to use GPT-5.6 Luna for every ACP summary:
+
+```json
+{
+  "compress": {
+    "compressionModel": {
+      "provider": "openai-codex",
+      "model": "gpt-5.6-luna",
+      "thinkingLevel": "xhigh"
+    }
+  }
+}
+```
+
 ---
 
 ## Prompts Customization
