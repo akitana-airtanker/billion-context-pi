@@ -11,6 +11,7 @@ import { debug, logWarn } from "./log.js";
  *  ~/.<CONFIG_DIR_NAME>/acp.json (global) and <cwd>/.<CONFIG_DIR_NAME>/acp.json
  *  (project-local overrides project-global). Project wins over global. */
 export interface UserAcpConfig {
+  enabled?: boolean;
   debug?: boolean;
   autoUpdate?: boolean;
   modelContextLimit?: number;
@@ -53,7 +54,7 @@ function join(... parts: string[]): string {
 }
 
 const KNOWN = new Set([
-  "debug", "autoUpdate", "modelContextLimit",
+  "enabled", "debug", "autoUpdate", "modelContextLimit",
   "toolBashDefaultTimeout", "toolOutputMaxBytes",
   "delegate", "compress", "displayUsage", "throttleRetry",
   "prompts", "acknowledgePromptsRisk",

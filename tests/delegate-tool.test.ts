@@ -1,6 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection } from "../src/delegate-tool.js";
+import { existsSync } from "node:fs";
+import { mkdir, readFile, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { buildChildArgs, delegateSpawnOptions, injectedWaitMessage, buildWaitResult, buildCancelResult, getDelegateUsage, resetDelegateUsage, injectResult, effectiveExitCode, formatRunResult, resolveWaitTimeoutMs, findUndeliveredRuns, undeliveredNoticeFrom, buildRecoveryNotice, makeDelegateTool, exitLabel, cancelledFileNote, delegateStdinText, readActivityTail, scheduleRunNotification, flushDelegateNotifications, formatBatchRunSection } from "../src/delegate-tool.js";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 /** Minimal ctx mock - buildChildArgs reads ctx.model and sessionManager. */
@@ -37,6 +41,7 @@ for (const role of RESTRICTED_ROLES) {
       { agent: role, task: "test task" },
       "prompt",
       mockCtx(),
+      "del_test",
     );
     const toolsStr = getToolsValue(cliArgs);
     assert.ok(toolsStr, `--tools flag present for ${role}`);
@@ -66,20 +71,22 @@ for (const role of RESTRICTED_ROLES) {
 // ─── Worker: no --tools, full default toolset ─────────────────────────────
 
 test("buildChildArgs omits --tools for worker role", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "worker", task: "fix bug" },
-    "You are a worker.",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "worker", task: "fix bug" },
+      "You are a worker.",
+      mockCtx(),
+      "del_test",
+    );
   assert.equal(getToolsValue(cliArgs), null, "worker does NOT receive --tools");
 });
 
 test("buildChildArgs worker still inherits provider/model from ctx", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "worker", task: "fix bug" },
-    "prompt",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "worker", task: "fix bug" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
   const providerIdx = cliArgs.indexOf("--provider");
   const modelIdx = cliArgs.indexOf("--model");
   assert.ok(providerIdx >= 0, "worker has --provider from ctx.model");
@@ -91,22 +98,24 @@ test("buildChildArgs worker still inherits provider/model from ctx", async () =>
 // ─── Unknown agent: no --tools ─────────────────────────────────────────────
 
 test("buildChildArgs omits --tools for unknown agent name", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "nonexistent-role", task: "test" },
-    "prompt",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "nonexistent-role", task: "test" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
   assert.equal(getToolsValue(cliArgs), null, "--tools not added for unknown agent");
 });
 
 // ─── --tools comes before --provider/--model ───────────────────────────────
 
 test("buildChildArgs places --tools before --provider/--model", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "reviewer", task: "test", model: "openai/gpt-5" },
-    "prompt",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "reviewer", task: "test", model: "openai/gpt-5" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
   const toolsIdx = cliArgs.indexOf("--tools");
   const providerIdx = cliArgs.indexOf("--provider");
   assert.ok(toolsIdx >= 0 && providerIdx >= 0);
@@ -116,11 +125,12 @@ test("buildChildArgs places --tools before --provider/--model", async () => {
 // ─── ctx.model inheritance (no explicit model) ────────────────────────────
 
 test("buildChildArgs inherits model from ctx when model not specified", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "reviewer", task: "test" },
-    "prompt",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "reviewer", task: "test" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
   const providerIdx = cliArgs.indexOf("--provider");
   const modelIdx = cliArgs.indexOf("--model");
   assert.ok(providerIdx >= 0, "--provider present from ctx.model");
@@ -132,11 +142,12 @@ test("buildChildArgs inherits model from ctx when model not specified", async ()
 // ─── explicit model override ──────────────────────────────────────────────
 
 test("buildChildArgs uses explicit model override when provided", async () => {
-  const { cliArgs } = await buildChildArgs(
-    { agent: "worker", task: "test", model: "anthropic/claude-5" },
-    "prompt",
-    mockCtx(),
-  );
+    const { cliArgs } = await buildChildArgs(
+      { agent: "worker", task: "test", model: "anthropic/claude-5" },
+      "prompt",
+      mockCtx(),
+      "del_test",
+    );
   const providerIdx = cliArgs.indexOf("--provider");
   const modelIdx = cliArgs.indexOf("--model");
   assert.ok(providerIdx >= 0);
@@ -186,6 +197,7 @@ test("buildChildArgs uses --mode json on pi for async delegates", async () => {
     { agent: "worker", task: "test" },
     "prompt",
     mockCtx("pi"),
+    "del_test",
   );
   assert.equal(isAsync, true);
   assert.equal(useJsonStream, true);
@@ -197,6 +209,7 @@ test("buildChildArgs falls back to -p on omp for async delegates", async () => {
     { agent: "worker", task: "test" },
     "prompt",
     mockCtx("omp"),
+    "del_test",
   );
   assert.equal(isAsync, true);
   assert.equal(useJsonStream, false);
@@ -210,6 +223,7 @@ test("buildChildArgs keeps -p for sync delegates even on pi", async () => {
     { agent: "worker", task: "test" },
     "prompt",
     ctx,
+    "del_test",
   );
   assert.equal(isAsync, false);
   assert.equal(useJsonStream, false);
@@ -288,7 +302,7 @@ const USAGE_FIXTURE = { input: 150, output: 80, cacheRead: 0, cacheWrite: 0, tot
 test("injectResult accumulates usage in separate mode when unreported", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", false);
   assert.equal(ok, true, "injection succeeds");
   const total = getDelegateUsage();
   assert.ok(total, "usage accumulated into session total");
@@ -299,7 +313,7 @@ test("injectResult accumulates usage in separate mode when unreported", () => {
 test("injectResult does not double-accumulate when usage already reported", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", true);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "separate", true);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "no accumulation when already reported");
 });
@@ -307,7 +321,7 @@ test("injectResult does not double-accumulate when usage already reported", () =
 test("injectResult merged mode injects without accumulating", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "merged", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, USAGE_FIXTURE, "merged", false);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "merged mode never accumulates");
 });
@@ -315,13 +329,13 @@ test("injectResult merged mode injects without accumulating", () => {
 test("injectResult without usage leaves cumulative total undefined", () => {
   resetDelegateUsage();
   const pi = { sendUserMessage: () => {} };
-  const ok = injectResult(pi as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out", undefined, undefined, "separate", false);
+  const ok = injectResult(pi as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out", undefined, undefined, "separate", false);
   assert.equal(ok, true, "injection succeeds");
   assert.equal(getDelegateUsage(), undefined, "no usage, no accumulation");
 });
 
 test("injectResult returns false when sendUserMessage unavailable", () => {
-  const ok = injectResult({} as any, "reviewer", "del_x", "test", 0, "/tmp/del_x.out");
+  const ok = injectResult({} as any, "reviewer", "del_x", "test", "completed", 0, "/tmp/del_x.out");
   assert.equal(ok, false, "no sendUserMessage means no injection");
 });
 
@@ -368,7 +382,7 @@ function capturePi(sent: string[]): { sendUserMessage: (text: string) => void } 
 
 test("injectResult failed run uses a loud FAILED header and carries the error excerpt", () => {
   const sent: string[] = [];
-  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 1, "/tmp/del_x.out", undefined, undefined, "separate", false, "Error: provider 429");
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "failed", 1, "/tmp/del_x.out", undefined, undefined, "separate", false, "Error: provider 429");
   assert.equal(ok, true, "injection succeeds");
   const text = sent[0]!;
   assert.ok(text.includes("[acp_delegate FAILED"), "FAILED header");
@@ -380,12 +394,74 @@ test("injectResult failed run uses a loud FAILED header and carries the error ex
 
 test("injectResult completed run keeps the completed header and no body", () => {
   const sent: string[] = [];
-  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", 0, "/tmp/del_x.out", undefined, undefined, "separate", false, "must not appear");
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "completed", 0, "/tmp/del_x.out", undefined, undefined, "separate", false, "must not appear");
   assert.equal(ok, true, "injection succeeds");
   const text = sent[0]!;
   assert.ok(text.includes("[acp_delegate completed]"), "completed header unchanged");
   assert.ok(!text.includes("FAILED"), "no FAILED marker");
   assert.ok(!text.includes("must not appear"), "completed runs carry no body");
+});
+
+// ─── #244: watchdog null-code finalize must not misreport FAILED ───────────
+// The watchdog/EOF grace kills the child (or it never exits), so close fires
+// with code === null even when the .out result is complete. finalize derives
+// run.status from the effective exit code; the notification must follow
+// run.status, never re-derive failure from the raw null code.
+
+test("effectiveExitCode: null code with delivered output counts as completed", () => {
+  assert.equal(effectiveExitCode(null, "full report", ""), 0, "non-empty output → 0");
+  assert.equal(effectiveExitCode(null, "", "stderr text"), 0, "non-empty stderr → 0");
+  assert.equal(effectiveExitCode(null, "", ""), null, "no output at all → null (genuine failure)");
+  assert.equal(effectiveExitCode(0, "", ""), 0, "real exit 0 untouched");
+  assert.equal(effectiveExitCode(1, "partial", ""), 1, "real non-zero code untouched");
+});
+
+test("injectResult null code + completed status: completed header, exit ?, no missing-result warning", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "completed", null, "/tmp/del_x.out", "output ended but process did not exit", undefined, "separate", false);
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate completed]"), "completed header despite null code");
+  assert.ok(text.includes("exit ?"), "raw null code kept as diagnostic");
+  assert.ok(text.includes("output ended but process did not exit"), "watchdog reason kept as diagnostic");
+  assert.ok(!text.includes("FAILED"), "no FAILED marker");
+  assert.ok(!text.includes("did NOT complete"), "no result-missing warning");
+  assert.ok(!text.includes("re-dispatch"), "no re-dispatch pressure");
+});
+
+test("injectResult null code + failed status: still a loud FAILED", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "failed", null, "/tmp/del_x.out", undefined, undefined, "separate", false, "(no output)");
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("[acp_delegate FAILED"), "FAILED header for genuine failure");
+  assert.ok(text.includes("exit ?"), "null code shown as ?");
+  assert.ok(text.includes("did NOT complete"), "result-missing warning kept for real failures");
+});
+
+test("watchdog null-code completed run: direct, wait, and recovery paths agree", () => {
+  const run = mkRun("del_w", "completed", {
+    exitCode: null,
+    result: { code: null, file: "/tmp/del_w.out", body: "full report" },
+  });
+  // direct notification path
+  const sent: string[] = [];
+  injectResult(capturePi(sent) as any, run.agent, run.runId, run.task, run.status, run.exitCode, run.result.file, "output ended but process did not exit", undefined, "separate", false);
+  const direct = sent[0]!;
+  assert.ok(direct.includes("[acp_delegate completed]"), "direct: completed");
+  assert.ok(!direct.includes("FAILED"), "direct: no FAILED");
+  assert.ok(!direct.includes("did NOT complete"), "direct: no missing-result warning");
+
+  // wait path
+  const waitText = formatRunResult(run);
+  assert.ok(waitText.includes("completed"), "wait: completed");
+  assert.ok(!waitText.includes("FAILED"), "wait: no FAILED");
+
+  // recovery path
+  const { text: recText } = buildRecoveryNotice([run], undefined);
+  assert.ok(recText.includes("completed"), "recovery: completed");
+  assert.ok(!recText.includes("FAILED"), "recovery: no FAILED");
+  assert.ok(!recText.includes("missing"), "recovery: no missing-work warning");
 });
 
 // ─── undelivered recovery (#16) ─────────────────────────────────────────────
@@ -465,6 +541,184 @@ test("async delegate with missing cwd injects FAILED instead of crashing the hos
   assert.match(sent[0]!, /FAILED/);
   assert.ok(sent[0]!.includes(runId!), "injection names the failed runId");
   assert.match(sent[0]!, /spawn error/);
+  // #235: spawn errors no longer delete the reply file — the error is written
+  // into it so the run points at a file like any other.
+  const outFile = join(tmpdir(), "acp-delegate", `${runId}.out`);
+  assert.ok(existsSync(outFile), "reply file retained after spawn error");
+  const outContent = await readFile(outFile, "utf8");
+  assert.match(outContent, /spawn error/);
+  assert.ok(sent[0]!.includes(outFile), "injection points at the retained file");
+  await rm(outFile, { force: true });
+});
+
+// ─── session flags: pi persists, omp does not (#235) ────────────────────────
+
+test("buildChildArgs pi host uses --session with a deterministic path (no --no-session)", async () => {
+  const { cliArgs, sessionFile } = await buildChildArgs(
+    { agent: "worker", task: "test" },
+    "prompt",
+    mockCtx("pi"),
+    "del_sess",
+  );
+  assert.ok(sessionFile, "sessionFile returned");
+  assert.ok(sessionFile!.endsWith("del_sess.session.jsonl"), "session file named after runId");
+  const idx = cliArgs.indexOf("--session");
+  assert.ok(idx >= 0, "--session present");
+  assert.equal(cliArgs[idx + 1], sessionFile);
+  const dirIdx = cliArgs.indexOf("--session-dir");
+  assert.ok(dirIdx >= 0, "--session-dir present");
+  assert.ok(!cliArgs.includes("--no-session"), "no --no-session on pi");
+});
+
+test("buildChildArgs omp host keeps --no-session and no sessionFile", async () => {
+  const { cliArgs, sessionFile } = await buildChildArgs(
+    { agent: "worker", task: "test" },
+    "prompt",
+    mockCtx("omp"),
+    "del_sess",
+  );
+  assert.equal(sessionFile, null, "no sessionFile on omp");
+  assert.ok(cliArgs.includes("--no-session"), "--no-session kept on omp");
+  assert.ok(!cliArgs.includes("--session"), "no --session on omp");
+});
+
+test("buildChildArgs resumeFrom targets the new run's session file", async () => {
+  const { cliArgs, sessionFile } = await buildChildArgs(
+    { agent: "worker", resumeFrom: "del_orig" },
+    "prompt",
+    mockCtx("pi"),
+    "del_new",
+  );
+  assert.ok(sessionFile?.endsWith("del_new.session.jsonl"), "resume targets the new run's own session file");
+  const idx = cliArgs.indexOf("--session");
+  assert.equal(cliArgs[idx + 1], sessionFile);
+});
+
+// ─── exit label + cancel note (#235) ────────────────────────────────────────
+
+test("exitLabel shows the signal when the child was killed without an exit code", () => {
+  assert.equal(exitLabel(0), "exit 0");
+  assert.equal(exitLabel(1), "exit 1");
+  assert.equal(exitLabel(null, "SIGTERM"), "exit SIGTERM");
+  assert.equal(exitLabel(null, null), "exit ?");
+  assert.equal(exitLabel(null), "exit ?");
+});
+
+test("cancelledFileNote points at the retained file and offers resumeFrom", () => {
+  const note = cancelledFileNote("del_x", "/tmp/acp-delegate/del_x.out");
+  assert.ok(note.includes("/tmp/acp-delegate/del_x.out"), "names the retained file");
+  assert.ok(note.includes('resumeFrom: "del_x"'), "offers resume");
+});
+
+// ─── resume stdin text (#235) ───────────────────────────────────────────────
+
+test("delegateStdinText passes the task through unchanged for fresh runs", () => {
+  assert.equal(delegateStdinText(false, "do the thing"), "do the thing");
+});
+
+test("delegateStdinText resumes with the instruction, optionally plus guidance", () => {
+  const bare = delegateStdinText(true, undefined);
+  assert.match(bare, /RESUMES a previously interrupted delegate run/);
+  assert.ok(!bare.includes("Additional guidance"), "no guidance section without a task");
+  const guided = delegateStdinText(true, "focus on the flaky test");
+  assert.match(guided, /RESUMES a previously interrupted delegate run/);
+  assert.ok(guided.includes("Additional guidance for this attempt:\nfocus on the flaky test"), "guidance appended");
+});
+
+// ─── failure diagnostics: activity log in the notification (#235) ───────────
+
+test("injectResult failed run includes the activity log path and exit signal", () => {
+  const sent: string[] = [];
+  const ok = injectResult(capturePi(sent) as any, "reviewer", "del_x", "review auth", "failed", null, "/tmp/del_x.out", undefined, undefined, "separate", false, "stderr:\nbang", "/tmp/del_x.activity", "SIGTERM");
+  assert.equal(ok, true, "injection succeeds");
+  const text = sent[0]!;
+  assert.ok(text.includes("Activity log: `/tmp/del_x.activity`"), "activity log path present");
+  assert.ok(text.includes("exit SIGTERM"), "signal shown in header");
+  assert.ok(text.includes("stderr:\nbang"), "composed body present");
+});
+
+test("readActivityTail truncates long logs and tolerates missing files", async () => {
+  const f = join(tmpdir(), `acp-tail-${Date.now()}.activity`);
+  await writeFile(f, "x".repeat(1000), "utf8");
+  const tail = await readActivityTail(f, 100);
+  assert.equal(tail.length, 101, "cap + ellipsis");
+  assert.ok(tail.startsWith("…"), "elided marker");
+  assert.equal(await readActivityTail(join(tmpdir(), "no-such-file-235.activity")), "", "missing file yields empty");
+  await rm(f, { force: true });
+});
+
+// ─── resume validation (#235) ───────────────────────────────────────────────
+
+test("acp_delegate resumeFrom with a missing session file fails fast without spawning", async () => {
+  const pi = {} as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const res = await tool.execute(
+    "tc-resume-missing",
+    { agent: "oracle", resumeFrom: "del_never_ran" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const text = (res.content[0] as { text?: string }).text ?? "";
+  assert.match(text, /Cannot resume del_never_ran/);
+  assert.match(text, /no session file/);
+});
+
+test("acp_delegate resumeFrom is rejected on non-pi hosts", async () => {
+  const pi = {} as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("omp"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const res = await tool.execute(
+    "tc-resume-omp",
+    { agent: "oracle", task: "x", resumeFrom: "del_x" },
+    undefined,
+    undefined,
+    ctx,
+  );
+  const text = (res.content[0] as { text?: string }).text ?? "";
+  assert.match(text, /only supported on pi hosts/);
+});
+
+test("acp_delegate resumeFrom copies the original session into the new run's file", async () => {
+  const sent: string[] = [];
+  const pi = { sendUserMessage: (t: string) => sent.push(t) } as unknown as Parameters<typeof makeDelegateTool>[0];
+  const tool = makeDelegateTool(pi);
+  const ctx = { ...mockCtx("pi"), mode: "tui", cwd: process.cwd() } as unknown as ExtensionContext;
+  const dir = join(tmpdir(), "acp-delegate");
+  await mkdir(dir, { recursive: true });
+  const origSession = join(dir, "del_orig235.session.jsonl");
+  const marker = "not-a-real-pi-session\n";
+  await writeFile(origSession, marker, "utf8");
+  let runId: string | undefined;
+  try {
+    const res = await tool.execute(
+      "tc-resume-copy",
+      { agent: "oracle", resumeFrom: "del_orig235", async: true },
+      undefined,
+      undefined,
+      ctx,
+    );
+    const launch = (res.content[0] as { text?: string }).text ?? "";
+    runId = /new runId `(del_[a-z0-9_]+)`/.exec(launch)?.[1];
+    assert.ok(runId, `new runId in launch message: ${launch}`);
+    const newSession = join(dir, `${runId}.session.jsonl`);
+    assert.ok(existsSync(newSession), "resumed run owns its own session file");
+    assert.equal(await readFile(newSession, "utf8"), marker, "history copied from the original run");
+    // The child (real pi CLI) rejects the invalid session content and exits 1.
+    const deadline = Date.now() + 15000;
+    while (!sent.length && Date.now() < deadline) await new Promise((r) => setTimeout(r, 100));
+    assert.equal(sent.length, 1, `one injected message, got ${JSON.stringify(sent)}`);
+    assert.match(sent[0]!, /FAILED/);
+    assert.ok(sent[0]!.includes(runId!), "injection names the resumed runId");
+  } finally {
+    await rm(origSession, { force: true });
+    if (runId) {
+      await rm(join(dir, `${runId}.session.jsonl`), { force: true });
+      await rm(join(dir, `${runId}.out`), { force: true });
+      await rm(join(dir, `${runId}.activity`), { force: true });
+    }
+  }
 });
 
 // ─── coalesced completion notifications (#157) ──────────────────────────────
