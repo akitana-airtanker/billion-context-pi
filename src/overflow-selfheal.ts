@@ -10,7 +10,7 @@
 //      fires before the overflow).
 //   2. ARM an emergency: we force the next context event's usage to >=95% so
 //      the kernel's emergency nudge + tool-result truncate fire immediately,
-//      even if the density-calibrated estimate under-reports the sent view.
+//      even if the estimate under-reports the sent view.
 //
 // This is the extension-side mirror of the proxy's overflow self-heal
 // (billion-context PR #172). Unlike throttle-retry we do NOT rewrite the error

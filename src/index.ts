@@ -4,6 +4,10 @@ import type {
   ExtensionFactory,
   SessionMessageEntry,
 } from "@earendil-works/pi-coding-agent";
+import { CONFIG_DIR_NAME } from "@earendil-works/pi-coding-agent";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { CoreMessage, NudgeDecision, CompressionBlock, Prompts } from "acp-kernel";
 import { renderNudgeText, resolvePrompts, defaultPrompts, viableRanges } from "acp-kernel";
 import { type AdapterConfig, resolveDelegate } from "./config.js";
@@ -19,7 +23,8 @@ import { buildAcpSystemPrompt, ACP_DELEGATE_PROMPT } from "./system-prompt.js";
 import { delegateStatusWidget } from "./fleet-widget.js";
 import { wireToolGuardrails } from "./tool-guardrails.js";
 import { debug, logError, logInfo, logWarn, logThrow, closeLogStream } from "./log.js";
-import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, lastUserMessageId, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { checkForUpdate } from "./update.js";
 import {
   THROTTLE_RETRY_ERROR_MESSAGE,
@@ -33,6 +38,7 @@ import {
 import { defaultCountTokens } from "acp-kernel";
 import { formatSystemPromptForEvent, getSystemPromptText } from "./compat.js";
 import { inspectOverflowMessage, reserveOutputHeadroom, shouldReserveOutputHeadroom } from "./overflow-selfheal.js";
+import { isOmpHost, OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 type AgentMessage = SessionMessageEntry["message"];
 
@@ -44,8 +50,12 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
       console.log("[bcp] disabled: BILLION_CONTEXT_PROXY detected — proxy handles compression");
       return;
     }
+    if (adapter.enabled === false || userConfigDisabled(process.cwd())) {
+      console.log("[bcp] disabled: enabled=false — ACP tools and system prompt off; Pi's native context management is in control");
+      return;
+    }
     const runtime = createRuntime(adapter);
-    wireCompactionDisable(pi);
+    wireCompactionDisable(pi, runtime);
     wireSessionLifecycle(pi, runtime);
     wireContextTransform(pi, runtime);
     wireSystemPrompt(pi, runtime);
@@ -56,7 +66,7 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
     pi.registerTool(makeDecompressTool(runtime));
     pi.registerTool(makeSearchTool(runtime));
     pi.registerTool(makeStatusTool(runtime));
-    for (const { name, options } of makeCommands(runtime)) {
+    for (const { name, options } of makeCommands(runtime, pi)) {
       pi.registerCommand(name, options);
     }
   };
@@ -64,10 +74,37 @@ export function createAcpExtension(adapter: AdapterConfig = {}): ExtensionFactor
 
 export default createAcpExtension();
 
+// Sync factory-time read of the `enabled` master switch: the factory runs at
+// extension load, before session_start (where the async loadUserConfig runs),
+// so a disabled adapter must be detected here to register nothing at all —
+// no tools, no system prompt, no context transform, and no compaction-cancel,
+// leaving Pi's native context management in control (issue #250: models too
+// small to handle ACP). Project acp.json overrides global; only a literal
+// enabled:true/false counts; missing/bad files mean "not disabled".
+function userConfigDisabled(cwd: string): boolean {
+  let disabled: boolean | undefined;
+  for (const base of [join(homedir(), CONFIG_DIR_NAME), join(cwd, CONFIG_DIR_NAME)]) {
+    try {
+      const parsed: unknown = JSON.parse(readFileSync(join(base, "acp.json"), "utf8"));
+      if (parsed && typeof parsed === "object") {
+        const v = (parsed as Record<string, unknown>).enabled;
+        if (v === true || v === false) disabled = v;
+      }
+    } catch {
+      // missing file / bad JSON → not disabled
+    }
+  }
+  return disabled === false;
+}
+
 // ACP owns compression; cancel Pi's built-in auto-compaction entirely (mirrors
-// opencode-acp requiring opencode's compaction.auto = false).
-function wireCompactionDisable(pi: ExtensionAPI): void {
-  pi.on("session_before_compact", () => ({ cancel: true }));
+// opencode-acp requiring opencode's compaction.auto = false). On a refused host
+// (OMP) we stand down and let the host compact normally instead.
+function wireCompactionDisable(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  pi.on("session_before_compact", () => {
+    if (runtime.refused) return;
+    return { cancel: true };
+  });
 }
 
 // (acp_delegate injection is best-effort: sendUserMessage is fire-and-forget
@@ -75,22 +112,36 @@ function wireCompactionDisable(pi: ExtensionAPI): void {
 // consumes the follow-up queue naturally — no shutdown drain needed.)
 
 function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
+  let ompWarned = false;
   pi.on("session_start", async (_event, ctx) => {
+    // OMP (oh-my-pi) is not supported: its in-process live-entries integration
+    // diverges the nudge's example refs from the session's real refs, so
+    // compress calls fail with "does not exist in this session". Stand down —
+    // refuse service and point the user at the billion-context proxy. session_start
+    // always precedes the first context/before_agent_start event, so setting
+    // `refused` here reliably gates every downstream handler for the session.
+    if (isOmpHost(ctx.sessionManager)) {
+      runtime.refused = true;
+      if (!ompWarned) {
+        ompWarned = true;
+        const sid = ctx.sessionManager.getSessionId();
+        logWarn("host", { event: "omp-unsupported", sid, action: "refused" });
+        if (ctx.hasUI) ctx.ui.notify(OMP_UNSUPPORTED_MESSAGE, "warning");
+        else console.error(OMP_UNSUPPORTED_MESSAGE);
+      }
+      return;
+    }
     runtime.store.invalidate();
     runtime.clearNudgeTracking();
     runtime.throttleFor(ctx.sessionManager.getSessionId()).reset();
     runtime.clearCompressRetryTracking();
-    // 新会话重置该模型的密度校准（文档 §5.3：模型/窗口切换时重新收敛）
-    const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-    runtime.density.resetModel(modelId);
     resetDelegateUsage();
     setDelegateDisplayUsage("separate");
     const sid = ctx.sessionManager.getSessionId();
-    runtime.clearSessionTracking(sid);
     // Model identity on every session start: diagnosing "which model loops
     // on compress rejections" from user logs required cwd forensics — the log
     // never said which model it was. id + contextWindow also catch window
-    // misconfigurations. (modelId above already feeds density calibration.)
+    // misconfigurations.
     const modelInfo = ctx.model as { id?: string; contextWindow?: number; api?: string } | undefined;
     logInfo("session", { event: "start", sid, cwd: ctx.cwd, debug: runtime.adapter.debug ?? null, version: typeof CURRENT_VERSION !== "undefined" ? CURRENT_VERSION : null, model: modelInfo?.id ?? null, modelApi: modelInfo?.api ?? null, contextWindow: modelInfo?.contextWindow ?? null });
     try {
@@ -123,7 +174,8 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
     // rpc/json/print have hasUI=false and the call is a no-op.
     delegateStatusWidget.setContext(ctx, runningRunsSnapshot);
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    runtime.clearDeadCompress(ctx.sessionManager.getSessionId());
     delegateStatusWidget.dispose();
     closeLogStream();
   });
@@ -134,13 +186,15 @@ function wireSessionLifecycle(pi: ExtensionAPI, runtime: AcpRuntime): void {
 // nudge decision) and return the transformed AgentMessage[].
 function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("context", async (event, ctx) => {
+    // Refused host (OMP): leave the context completely untouched — no ref tags,
+    // no compression, no nudge. Returning undefined makes pi send the original
+    // messages verbatim.
+    if (runtime.refused) return;
     const sid = ctx.sessionManager.getSessionId();
     const release = await runtime.acquireLock(sid);
     try {
       await runtime.reloadConfig(ctx.cwd);
-      // 每轮绑定 countTokens 使用的模型（密度校准按 model 隔离）
       const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
-      runtime.setCountModel(modelId);
       const { state, coreMessages, entries } = await runtime.stateFor(ctx, event.messages);
       const configBase = runtime.configFor(ctx);
       const ov = runtime.overflowFor(sid);
@@ -176,34 +230,32 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
         }
       }
       const coveredIds = collectCoveredMessageIds(state);
-      // Nudge arbitration on the SENT-VIEW scale: chars/4 estimate over the
-      // pruned projection + measured system prompt. pi's real usage is
-      // anchored on the last assistant's provider-reported usage when
-      // available — close to the sent view — but it falls back to summing
-      // the whole session tree (originals included, never shrinks) when the
-      // provider reports no usage. After compression (or after switching to
-      // a smaller-window model) that tree number can exceed the window many
-      // times over while the real sent view is a few percent — permanent
-      // false EMERGENCY nudges while the session keeps working (omp issue
-      // #18 report; same host lineage). The tree-scale number is logged for
-      // diagnostics only.
+      // Nudge arbitration on the SENT-VIEW scale: CJK-aware estimate over the
+      // pruned projection + measured system prompt, floored at the host's real
+      // context usage (issue #257, below). realUsage is anchored on the last
+      // assistant's provider-reported usage when available; it is also logged
+      // for diagnostics.
       const realUsage = ctx.getContextUsage?.();
       const systemPromptText = getSystemPromptText(ctx);
       const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
       const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
-      // Usage/emergency arbitration on the CALIBRATED sent view: density is
-      // the provider-anchored real/estimate ratio learned by the estimator
-      // (docs/token-calibration-plan.md §3.2). Raw CJK-aware estimates
-      // under-report CJK context by ~20-40%, which would delay the forced
-      // nudge and emergency truncate past the real window. The estimator
-      // below is fed the RAW sentTokens — its samples must stay on the
-      // raw basis or density would chase its own calibration.
-      let tokenCount = calibrateTokens(sentTokens, runtime.density.densityFor(modelId));
+      // Usage/emergency arbitration on the sent view, floored at the host's
+      // real context usage (issue #257): the CJK-aware base estimate is still
+      // a heuristic (images, mixed content, per-model tokenizer drift), so
+      // the 0.75/0.95 bands run on the real scale via the floor. realUsage is
+      // anchored on the last assistant's provider-reported usage + trailing
+      // estimate. Only ever raises (never lowers); skipped while the anchor
+      // predates a successful compress (floor-stale.ts). tokenCount only
+      // feeds processTurn.
+      let tokenCount = sentTokens;
+      const realPromptTokens = realUsage?.tokens ?? 0;
+      if (!usageAnchorPredatesCompression(entries) && realPromptTokens > tokenCount) {
+        tokenCount = realPromptTokens;
+      }
       // Self-heal (armed): after an overflow, force this turn's usage to >=95%
       // so the kernel's emergency nudge + tool-result truncate fire immediately,
-      // even if the density-calibrated estimate under-reports the sent view.
-      // tokenCount only feeds processTurn (nudge/truncate); density.update below
-      // uses the raw sentTokens, so the boost cannot corrupt calibration.
+      // even if the estimate under-reports the sent view. tokenCount only feeds
+      // processTurn (nudge/truncate).
       if (ov.armed && config.modelContextLimit > 0) {
         ov.armed = false;
         const floor = Math.floor(config.modelContextLimit * 0.95);
@@ -212,19 +264,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
           logWarn("overflow-selfheal", { sid, event: "armed-emergency", tokenCount, limit: config.modelContextLimit });
         }
       }
-      // A compress happened since the previous context round: blocks are
-      // created out-of-band by the compress tool, so detect new active
-      // blocks on the LOADED state vs. the previous round (comparing a
-      // single processTurn's input/output can never see them).
-      const postCompression = runtime.noteActiveBlocks(
-        sid,
-        state.blocks.filter((b) => b.active).map((b) => b.blockId),
-      );
-
       debug.event("context-in", {
         sid,
         modelId,
-        density: runtime.density.densityFor(modelId),
         eventMsgs: event.messages?.length ?? 0,
         entries: entries.length,
         coreMsgs: coreMessages.length,
@@ -237,11 +279,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
       const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount });
       await runtime.save(turn.state, ctx);
-      // 密度校准（Phase 2）：processTurn 后调用，countTokens 用上一轮 density（1 轮延迟可忽略）。
-      // real 侧 = provider 锚定 usage（缺失时锚点冻结，§5.9）；est 侧 = 发送视图估算
-      // （estimateTokens 内部走 CJK 感知 defaultCountTokens，与注入 kernel 的计数器同源）。
-      // postCompression = 自上一轮 context 事件以来新增了 active block（模型刚压缩过）。
-      runtime.density.update(modelId, realUsage?.tokens ?? null, sentTokens, postCompression);
 
       logInfo("turn", {
         sid,
@@ -258,7 +295,6 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
       });
       debug.event("processTurn", {
         modelId,
-        density: runtime.density.densityFor(modelId),
         outMsgs: turn.messages.length,
         summaryMsgs: turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
         prunedMsgs: coreMessages.length - turn.messages.length + turn.messages.filter((m) => m.id.startsWith("acp_summary")).length,
@@ -371,6 +407,9 @@ function wireContextTransform(pi: ExtensionAPI, runtime: AcpRuntime): void {
 
 function wireSystemPrompt(pi: ExtensionAPI, runtime: AcpRuntime): void {
   pi.on("before_agent_start", (event) => {
+    // Refused host (OMP): don't inject the ACP system prompt — the model must
+    // not learn about compress/decompress on a host where they can't work.
+    if (runtime.refused) return;
     const delegate = runtime.adapter.delegate !== false;
     const acp = buildAcpSystemPrompt(runtime.prompts);
     const prompt = delegate ? `${acp}\n${ACP_DELEGATE_PROMPT}` : acp;

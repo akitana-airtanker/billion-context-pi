@@ -1,8 +1,10 @@
-import type { ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, RegisteredCommand, SessionEntry } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
+import { ACP_STATUS_CUSTOM_TYPE } from "./messages.js";
 import { defaultCountTokens, parseBlockIdArg, collectBlockContent } from "acp-kernel";
 import { getSystemPromptText } from "./compat.js";
-import { collectCoveredMessageIds, estimateTokens, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { collectCoveredMessageIds, estimateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { buildStatusPanel } from "acp-kernel/panel";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { ensureSubagentAcpTools } from "./setup-subagent-tools.js";
@@ -25,20 +27,31 @@ function cacheUsageSamples(entries: SessionEntry[]): Array<{ input: number; cach
   return out;
 }
 
-export function makeCommands(runtime: AcpRuntime): Array<{ name: string; options: CommandOptions }> {
+export function makeCommands(runtime: AcpRuntime, pi?: ExtensionAPI): Array<{ name: string; options: CommandOptions }> {
+  // Persistent transcript output (rendered by TUI and web hosts like pi-web);
+  // notify() is a transient toast and only the fallback for hosts without
+  // sendMessage (issue #255).
+  const statusHandler = async (_args: string, ctx: ExtensionCommandContext) => {
+    const text = await statusReport(runtime, ctx);
+    if (typeof pi?.sendMessage === "function") {
+      pi.sendMessage({ customType: ACP_STATUS_CUSTOM_TYPE, content: text, display: true });
+      return;
+    }
+    ctx.ui.notify(text);
+  };
   return [
     {
       name: "acp",
       options: {
         description: "Show ACP context usage, token breakdown, and compression status.",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: statusHandler,
       },
     },
     {
       name: "acp-status",
       options: {
         description: "Detailed ACP status (block tiers, token breakdown, delegate usage).",
-        handler: async (_args, ctx) => ctx.ui.notify(await statusReport(runtime, ctx)),
+        handler: statusHandler,
       },
     },
     {
@@ -118,23 +131,21 @@ async function statusReport(runtime: AcpRuntime, ctx: ExtensionCommandContext): 
   // Use pi's real context usage (anchored on provider usage) only for the
   // panel's footer-scale display line; see sentTokens below for arbitration.
   const realUsage = ctx.getContextUsage?.();
+  const anchorStale = usageAnchorPredatesCompression(entries ?? []);
 
   // Nudge arbitration on the SENT-VIEW scale — must match the context
-  // transform and acp_status. pi's getContextUsage is anchored on the last
-  // assistant's provider-reported usage when available (≈ real sent view,
-  // fine), but falls back to summing the whole session tree when providers
-  // don't report usage — same class of false emergency as the omp 180K-
-  // window/366K-tree report (session keeps chatting while nudge screams
-  // EMERGENCY at 204%). The tree-scale number stays in the log only.
+  // transform and acp_status: sent-view estimate floored at the host's real
+  // context usage (issue #257).
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const imageTokens = collectImageTokens(entries, modelSupportsImages(ctx.model));
   const imageTokensTotal = [...imageTokens.values()].reduce((a, b) => a + b, 0);
-  const sessionTokens = realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
+  const sessionTokens = !anchorStale && realUsage?.tokens && realUsage.tokens > 0 ? realUsage.tokens : defaultCountTokens(coreMessages.map((m) => m.text ?? "").join("\n")) + imageTokensTotal;
   const coveredIds = collectCoveredMessageIds(state);
-  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
   const sentTokens = estimateTokens(coreMessages, coveredIds, imageTokens) + systemPromptTokens;
-  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)) });
+  // issue #257: floor the meter at the host's real context usage so the
+  // panel's nudge matches the real decision (same as src/index.ts).
+  const turn = runtime.core.processTurn({ messages: coreMessages, state, config, tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, realUsage?.tokens ?? 0) });
 
   // Shared kit surface renders the panel (dual accounting, viability
   // filtering, bars, block list with topic fallback). Host-specific inputs:

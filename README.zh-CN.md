@@ -20,6 +20,8 @@
 
 ---
 
+> **宿主支持:** 本插件面向 **Pi**。它**不支持 OMP(oh-my-pi)** —— 在 OMP 宿主上会拒绝运行。OMP 用户请改用 [billion-context](https://github.com/ranxianglei/billion-context)(`bili omp`)。详细说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
+
 ## 为什么选择 billion-context
 
 当对话变长,模型的上下文会耗尽。多数工具采用硬截断 —— 静默丢弃早期消息。**billion-context** 把 `compress` 工具交给模型:由 LLM 决定**何时**压缩、压缩**什么**,将内容压缩成高保真摘要,在回收上下文空间的同时保留关键细节(文件路径、决策、错误字符串)。
@@ -70,6 +72,22 @@ billion-context 通过拦截 Pi 的 `context` 事件接管上下文管理。**Pi
 1. **只保留一个上下文压缩插件。** 如果同时运行两个压缩插件(例如 billion-context-pi 和另一个),它们都会改写消息列表、互相覆盖 —— 已压缩的范围可能被重新展开或破坏。Pi 的内置自动压缩已由 billion-context-pi 自动取消,但任何*第三方*压缩/compaction 扩展都应卸载。
 
 2. **即使只有一个压缩插件,在少数情况下仍可能出现干扰。** Pi 下的加载顺序由文件系统发现顺序(`fs.readdirSync` 遍历 `.pi/extensions/` → 全局 → 包)决定,并不完全确定。如果另一个(非压缩类)扩展也 hook 了 `context` 事件、且恰好加载在 billion-context-pi *之后*,它可能修改压缩后的输出。billion-context-pi 从会话日志重建工作集(而非链式输入),这让它对*排在它之前*的 handler 鲁棒 —— 但无法防御*排在它之后*的 handler。这是 Pi 扩展模型的固有限制;若你观察到上下文行为异常,请检查是否有其他已安装扩展拦截了 `context` 事件。
+
+## 宿主支持
+
+billion-context-pi 面向 **Pi** 编码代理(`@earendil-works/pi-coding-agent`)构建,并在会话开始时检测宿主:
+
+- **Pi** — 完全支持。
+- **OMP(`can1357/oh-my-pi`)** — **不支持。** OMP 的进程内会话 API 与 Pi 不同,扩展注入的压缩引用可能与会话的真实引用漂移失步,导致 `compress` 调用失败,报错 `does not exist in this session`(issue [#234](https://github.com/ranxianglei/billion-context-pi/issues/234))。在 OMP 上,扩展现在会**拒绝服务**:打印警告、禁用 ACP 工具,并保持宿主自身的上下文处理不受影响。
+
+  **请改用 [billion-context](https://github.com/ranxianglei/billion-context)** — 它把同样的压缩流水线运行在服务端代理里,因此引用不会漂移:
+
+  ```bash
+  npm install -g billion-context
+  bili omp   # 让 OMP 通过代理运行
+  ```
+
+  完整说明:[docs/omp.zh-CN.md](./docs/omp.zh-CN.md)。
 
 ## 模型工具
 

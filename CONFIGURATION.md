@@ -93,6 +93,7 @@ All keys below are currently **ACTIVE**.
 
 | Key | Type | Default | Status | Description |
 |-----|------|---------|--------|-------------|
+| `enabled` | boolean | `true` | 🟢 ACTIVE | Master switch. `false` turns the whole adapter off (no tools, no system prompt, no context transform) — for models too small to handle ACP. Requires a Pi restart. |
 | `debug` | boolean | `false` | 🟢 ACTIVE | Enable verbose debug-level events in the log. |
 | `autoUpdate` | boolean | `true` | 🟢 ACTIVE | Check npm for a newer version on startup and auto-install it. |
 | `modelContextLimit` | number | *(auto)* | 🟢 ACTIVE | Override the context limit (in tokens). |
@@ -146,6 +147,13 @@ All keys below are currently **ACTIVE**.
 ---
 
 ## General
+
+### `enabled`
+
+- **Type:** `boolean`
+- **Default:** `true`
+- **Status:** 🟢 ACTIVE
+- **Description:** Master switch for the entire adapter. Set to `false` to turn ACP off completely: no `compress`/`decompress`/`search_context`/`acp_status` tools, no ACP system prompt, no context transformation, and no suppression of Pi's built-in auto-compaction — Pi's native context management runs instead. Intended for small local models (e.g. quantized 27B) that cannot reliably drive ACP's compression loop. Checked once at extension load, so it requires restarting Pi after editing `acp.json`. Project-local `acp.json` overrides the global one.
 
 ### `debug`
 

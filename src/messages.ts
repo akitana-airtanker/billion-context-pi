@@ -18,13 +18,17 @@ const REF_TAG_SOURCE = "(?:\x3cacp\\s[^>]*\x3em\\d{5}\x3c/acp\x3e|\\[m\\d{1,5}\\
 const REF_TAG = new RegExp(`^${REF_TAG_SOURCE}\\s?\\n?`);
 const TRAILING_REF_TAG = new RegExp(`\\n*${REF_TAG_SOURCE}\\s*$`);
 
+// /acp panels are UI-only transcript output (issue #255): persistent in the
+// session, but never projected into the sent view.
+export const ACP_STATUS_CUSTOM_TYPE = "acp-status";
+
 export function entriesToCoreMessages(entries: SessionEntry[]): CoreMessage[] {
   const out: CoreMessage[] = [];
   for (const entry of entries) {
     if (entry.type !== "message") {
       // custom_message participates in LLM context per Pi native semantics
       // (session-manager.d.ts) — project it as a user message.
-      if (entry.type === "custom_message") {
+      if (entry.type === "custom_message" && entry.customType !== ACP_STATUS_CUSTOM_TYPE) {
         const text = extractText(entry.content);
         if (text.length > 0) {
           out.push({ id: entry.id, role: "user", contentType: "text", text });

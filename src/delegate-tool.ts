@@ -162,7 +162,7 @@ const AGENT_NAMES = Object.keys(AGENTS);
 
 // ─── Run registry (module-level, shared across tools) ───────────────────────
 
-type RunStatus = "running" | "completed" | "failed" | "cancelled";
+export type RunStatus = "running" | "completed" | "failed" | "cancelled";
 
 interface DelegateRun {
   runId: string;
@@ -480,7 +480,7 @@ The delegate runs in its own clean pi process — it does NOT see this conversat
   };
 }
 
-function formatRunResult(run: DelegateRun): string {
+export function formatRunResult(run: DelegateRun): string {
   const timeoutNote = run.timedOut ? ` (timed out: ${run.timedOut})` : "";
   const exit = exitLabel(run.exitCode ?? null, run.exitSignal);
   const header =
@@ -966,7 +966,7 @@ async function runDelegate(
           }
           // EOF-watchdog finalize has no exit code; if the output was delivered,
           // treat it as a completed result (the process is killed afterwards).
-          const effectiveCode = code ?? (output || stderrText ? 0 : null);
+          const effectiveCode = effectiveExitCode(code, output, stderrText);
           // Atomically flip status + result together: until this point the run
           // is still "running" to any observer, so a concurrent wait cannot
           // see "finished but result missing".
@@ -989,7 +989,7 @@ async function runDelegate(
             return;
           }
           const mode = delegateDisplayUsage;
-          const injected = injectResult(pi, args.agent, runId, taskText, code, file, run.timedOut, run.usage, mode, run.usageReported, run.status === "failed" ? body : undefined, run.status === "failed" ? run.activityFile : undefined, signal);
+          const injected = injectResult(pi, args.agent, runId, taskText, run.status, code, file, run.timedOut, run.usage, mode, run.usageReported, run.status === "failed" ? body : undefined, run.status === "failed" ? run.activityFile : undefined, signal);
           if (run.usage && !run.usageReported && (mode === "separate" || injected)) {
             run.usageReported = true;
           }
@@ -1186,11 +1186,22 @@ function formatSyncResult(agent: string, runId: string, task: string, r: ChildRe
   return formatPayload(header, file, task, body);
 }
 
+/** Watchdog/EOF finalize arrives with code === null (the child was killed or
+ *  never exited). If a result was delivered (non-empty reply or stderr), the
+ *  run counts as completed (0); otherwise it stays null = genuine failure. */
+export function effectiveExitCode(code: number | null, output: string, stderr: string): number | null {
+  return code ?? (output || stderr ? 0 : null);
+}
+
+/** status (set by finalize from the effective exit code) is the authority for
+ *  the FAILED/completed decision; the raw code is diagnostic display only
+ *  ("exit ?"), so the notification can never disagree with run.status. */
 export function injectResult(
   pi: ExtensionAPI,
   agent: string,
   runId: string,
   task: string,
+  status: RunStatus,
   code: number | null,
   file: string,
   timedOut?: string,
@@ -1207,8 +1218,8 @@ export function injectResult(
     logWarn("delegate", { event: "inject-skipped", runId, reason: "sendUserMessage unavailable" });
     return false;
   }
-  const failed = code !== 0;
-  const status = failed ? "FAILED ⚠️" : "completed";
+  const failed = status === "failed";
+  const statusLabel = failed ? "FAILED ⚠️" : "completed";
   // Tell the model how many other delegates are still running, so it doesn't
   // lose count when many were dispatched in a batch (e.g. launched 5, this is
   // the 2nd to return → "3 still running" → the model knows to keep waiting).
@@ -1255,7 +1266,7 @@ export function injectResult(
   const closing = failed
     ? "This delegate did NOT complete its task — its result is missing from your work. Read the error excerpt (and the result file if present), then decide whether to re-dispatch the task before wrapping up. This is an automated system notification, NOT a user message."
     : "This is an automated system notification, NOT a user message. Read the result file if you need the details, then continue your original task; do not treat this as a new user request.";
-  const header = `[acp_delegate ${status}] **${agent}** (runId \`${runId}\`, ${exitLabel(code, signal)})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
+  const header = `[acp_delegate ${statusLabel}] **${agent}** (runId \`${runId}\`, ${exitLabel(code, signal)})${timeoutNote}${remainingLine}${usageNote} ${closing}`;
   const { text: recoveryText, covered } = buildRecoveryNotice(Array.from(runs.values()), runId);
   const text = formatPayload(header, file, task, failed ? body : undefined, failed ? activityFile : undefined) + (recoveryText ? `\n\n${recoveryText}` : "");
   try {
@@ -1288,6 +1299,7 @@ function notifyTerminalFailure(pi: ExtensionAPI, run: DelegateRun, body: string)
     run.agent,
     run.runId,
     run.task,
+    run.status,
     run.result?.code ?? null,
     run.result?.file ?? "",
     run.timedOut,

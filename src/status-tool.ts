@@ -2,11 +2,13 @@ import { Type, type Static } from "typebox";
 import type { AgentToolResult, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import type { AcpRuntime } from "./runtime.js";
 import { buildStatusReport, defaultCountTokens, formatRanges, viableRanges } from "acp-kernel";
-import { estimateTokens, collectCoveredMessageIds, calibrateTokens, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { estimateTokens, collectCoveredMessageIds, collectImageTokens, modelSupportsImages } from "./tokens.js";
+import { usageAnchorPredatesCompression } from "./floor-stale.js";
 import { getSystemPromptText } from "./compat.js";
 import { logThrow } from "./log.js";
 import { getDelegateUsage } from "./delegate-tool.js";
 import { resolveDelegate } from "./config.js";
+import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 const StatusParams = Type.Object({
   scope: Type.Optional(Type.Union([Type.Literal("compressed"), Type.Literal("uncompressed")], { description: '"compressed" = drill into blocks; "uncompressed" = show visible messages/ranges. Default: overview.' })),
@@ -32,6 +34,7 @@ export function makeStatusTool(runtime: AcpRuntime): ToolDefinition<typeof Statu
     ],
     parameters: StatusParams,
     async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+      if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
       let result: string;
       try {
         result = await handleStatus(params as StatusArgs, runtime, ctx);
@@ -53,18 +56,20 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   // pruned messages showed up in acp_status even though they never reached
   // the model.
   const coveredIds = collectCoveredMessageIds(state);
-  // Sent-view arbitration (same scale as the context transform): never the
-  // session-tree number from getContextUsage, which includes compressed
-  // originals and never shrinks (false emergencies; see src/index.ts).
-  const modelId = (ctx.model as { id?: string } | undefined)?.id ?? "default";
+  // Sent-view arbitration (same scale as the context transform), floored at
+  // the host's real context usage (issue #257; see src/index.ts).
   const systemPromptText = getSystemPromptText(ctx);
   const systemPromptTokens = systemPromptText ? defaultCountTokens(systemPromptText) : 0;
   const sentTokens = estimateTokens(coreMessages, coveredIds, collectImageTokens(entries, modelSupportsImages(ctx.model))) + systemPromptTokens;
+  // issue #257: run the nudge decision on the real scale — floor the sent-view
+  // estimate at the host's real context usage (same as src/index.ts).
+  const providerReal = ctx.getContextUsage?.()?.tokens ?? 0;
+  const anchorStale = usageAnchorPredatesCompression(entries);
   const turn = runtime.core.processTurn({
     messages: coreMessages,
     state,
     config,
-    tokenCount: calibrateTokens(sentTokens, runtime.density.densityFor(modelId)),
+    tokenCount: anchorStale ? sentTokens : Math.max(sentTokens, providerReal),
   });
   const processed = turn.messages;
 
@@ -86,6 +91,17 @@ async function handleStatus(args: StatusArgs, runtime: AcpRuntime, ctx: Extensio
   const protectedRanges = nudge?.protectedRanges ?? [];
 
   const extra: string[] = [];
+  // issue #257: side-by-side estimate vs provider-real so estimator drift is
+  // visible at a glance (Estimate is the pre-floor sent-view meter).
+  if (providerReal > 0 && config.modelContextLimit > 0) {
+    const fmtK = (n: number): string => (n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n));
+    const estPct = Math.round((sentTokens / config.modelContextLimit) * 100);
+    const realPct = Math.round((providerReal / config.modelContextLimit) * 100);
+    extra.push("");
+    extra.push(
+      `Estimate: ${fmtK(sentTokens)} (${estPct}%)   |   Provider-reported: ${fmtK(providerReal)} (${realPct}%)`,
+    );
+  }
   if (nudge) {
     extra.push("");
     extra.push(

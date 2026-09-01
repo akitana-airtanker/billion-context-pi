@@ -4,6 +4,7 @@ import { searchBlocks, type SearchResult } from "acp-kernel";
 import type { AcpRuntime } from "./runtime.js";
 import { buildSearchDocs } from "./search-index.js";
 import { logThrow } from "./log.js";
+import { OMP_UNSUPPORTED_MESSAGE } from "./omp.js";
 
 const SearchParams = Type.Object({
     query: Type.String({ description: "Keywords to locate detail folded into compressed summaries or historical messages." }),
@@ -25,10 +26,11 @@ export function makeSearchTool(runtime: AcpRuntime): ToolDefinition<typeof Searc
             "Message hits link to the owning block — decompress that block to recover surrounding detail.",
         ],
         parameters: SearchParams,
-        async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
-            let result: string;
-            try {
-                result = await handleSearch(params as SearchArgs, runtime, ctx);
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx): Promise<AgentToolResult<unknown>> {
+        if (runtime.refused) return { details: undefined, content: [{ type: "text", text: OMP_UNSUPPORTED_MESSAGE }] };
+        let result: string;
+        try {
+            result = await handleSearch(params as SearchArgs, runtime, ctx);
             } catch (e) {
                 logThrow("search", e, { sid: ctx.sessionManager.getSessionId(), query: (params as SearchArgs).query });
                 throw e;
