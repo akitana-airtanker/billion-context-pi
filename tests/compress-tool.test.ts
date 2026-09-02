@@ -194,3 +194,67 @@ test("compress afterTokens is measured on the same sent-view scale as beforeToke
   assert.ok(reclaimed <= 180, `reclaimed ${reclaimed} over-claimed (raw afterTokens would be ~220): ${text}`);
   assert.equal(before - after, reclaimed, "reclaimed consistent with the arrow");
 });
+
+// The applied log event must record which model actually summarized the
+// ranges — that is the evidence that ACP compression really routed to the
+// configured external model (e.g. openai-codex/gpt-5.6-luna:xhigh).
+// reloadConfig() merges the REAL ~/.pi/acp.json into the adapter, so the
+// "unconfigured" case must isolate HOME to a directory with no acp.json
+// (same technique as e2e-compress-config.test.ts).
+async function runLoggedCompress(opts: { compressionModel?: any; logFile: string; stateFile: string; callId: string; isolatedHome?: boolean }) {
+  const { api, handlers } = captureApi();
+  const config: any = { modelContextLimit: 200_000, coreOverrides: { preserveRecentTokens: 0 } };
+  if (opts.compressionModel) config.compress = { compressionModel: opts.compressionModel };
+  const savedHome = process.env.HOME;
+  if (opts.isolatedHome) process.env.HOME = "/tmp/pai-acp-isolated-home";
+  createAcpExtension(
+    config,
+    opts.compressionModel ? { compressionModelInvoker: { summarize: async () => EXTERNAL_SUMMARY } } : undefined,
+  )(api as any);
+  await rm(`${opts.stateFile}.acp.json`, { force: true });
+  await rm(opts.logFile, { force: true });
+  const prev = process.env.ACP_LOG_FILE;
+  process.env.ACP_LOG_FILE = opts.logFile;
+  try {
+    const ctx = fakeCtx([
+      userMsg("e1", LONG_ORIGINAL),
+      ...Array.from({ length: 9 }, (_, i) => userMsg(`e${i + 2}`, `recent ${i + 2}`)),
+    ], opts.stateFile);
+    ctx.__setUsage(100_000);
+    await runContextRound(handlers, ctx);
+    const compressTool = api.tools.find((t: any) => t.name === "compress")!;
+    await compressTool.execute(
+      opts.callId,
+      { content: [{ startId: "m00001", endId: "m00001", summary: ACTIVE_SUMMARY }] },
+      undefined, undefined, ctx,
+    );
+    const log = await readFile(opts.logFile, "utf8");
+    const line = log.split("\n").find((l) => l.includes("[compress]") && l.includes("event=applied"));
+    assert.ok(line, `no applied event line in log: ${log}`);
+    return line!;
+  } finally {
+    if (opts.isolatedHome) process.env.HOME = savedHome;
+    if (prev === undefined) delete process.env.ACP_LOG_FILE; else process.env.ACP_LOG_FILE = prev;
+  }
+}
+
+test("applied event logs the resolved compressionModel string (provider/model:thinkingLevel)", async () => {
+  const line = await runLoggedCompress({
+    compressionModel: { provider: "openai-codex", model: "gpt-5.6-luna" },
+    logFile: "/tmp/pai-acp-compress-logmodel.log",
+    stateFile: "/tmp/pai-acp-compress-logmodel.session.json",
+    callId: "tc-logmodel",
+    isolatedHome: true,
+  });
+  assert.match(line, /compressionModel=openai-codex\/gpt-5\.6-luna:xhigh/);
+});
+
+test("applied event logs compressionModel=null when no external model is configured", async () => {
+  const line = await runLoggedCompress({
+    logFile: "/tmp/pai-acp-compress-logmodel-null.log",
+    stateFile: "/tmp/pai-acp-compress-logmodel-null.session.json",
+    callId: "tc-logmodel-null",
+    isolatedHome: true,
+  });
+  assert.match(line, /compressionModel=null/);
+});
