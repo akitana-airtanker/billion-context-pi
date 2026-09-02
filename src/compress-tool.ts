@@ -464,6 +464,7 @@ async function handleCompress(
     warnings: warnings.length,
     errors: errors.length,
     newBlockIds: newBlocks.map((b) => b.blockId),
+    compressionModel: compressionModel ? `${compressionModel.provider}/${compressionModel.model}${compressionModel.thinkingLevel ? `:${compressionModel.thinkingLevel}` : ""}` : null,
   });
   if (errors.length > 0) {
     logError("compress", { sid: ctx.sessionManager.getSessionId(), event: "errors", count: errors.length, errors: errors.slice(0, 5) });
